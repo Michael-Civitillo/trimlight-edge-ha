@@ -69,6 +69,68 @@ Authentication uses the official HMAC-SHA256 token scheme from the Trimlight V2 
 
 ---
 
+## Example Automations
+
+This is where having your lights in Home Assistant actually pays off — you can tie them into everything else in your smart home.
+
+**Flash red when the alarm is triggered**
+```yaml
+automation:
+  - alias: "Flash lights red on alarm"
+    trigger:
+      - platform: state
+        entity_id: alarm_control_panel.home
+        to: "triggered"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.front_house
+        data:
+          effect: "Red Strobe"
+          brightness: 255
+```
+
+**Switch to a holiday effect on a schedule**
+```yaml
+automation:
+  - alias: "Christmas lights on at sunset"
+    trigger:
+      - platform: sun
+        event: sunset
+    condition:
+      - condition: template
+        value_template: "{{ now().month == 12 }}"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.front_house
+        data:
+          effect: "Christmas"
+          brightness: 200
+      - delay: "04:00:00"
+      - service: light.turn_off
+        target:
+          entity_id: light.front_house
+```
+
+**Turn off when everyone leaves**
+```yaml
+automation:
+  - alias: "Lights off when nobody home"
+    trigger:
+      - platform: state
+        entity_id: zone.home
+        to: "0"
+    action:
+      - service: light.turn_off
+        target:
+          entity_id: light.front_house
+```
+
+The point is — once your Trimlight is in HA, it plays nicely with everything else. Presence detection, alarm systems, calendar events, other smart home devices — all from one place.
+
+---
+
 ## Known Limitations
 
 - **Effect name after app changes** — if you switch effects in the Trimlight app, HA won't know the name of the new effect until you pick one through HA. The API doesn't include effect names in the running state.
