@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Trimlight Edge",
+        "description": "Enter the API credentials provided by Trimlight. Contact their support to obtain a clientId and clientSecret.",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect. Verify your Client ID and Client Secret.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Trimlight account is already configured."
+    }
+  }
+}
