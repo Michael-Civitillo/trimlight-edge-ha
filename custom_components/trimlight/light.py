@@ -96,9 +96,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         """Device is available only when online."""
         return self._data.get("connectivity", 0) == 1
 
-    @property
-    def is_on(self) -> bool:
-        return self._data.get("switchState", 0) != SWITCH_STATE_OFF
+    def _handle_coordinator_update(self) -> None:
+        """Update state from coordinator data, preserving optimistic writes."""
+        self._attr_is_on = self._data.get("switchState", 0) != SWITCH_STATE_OFF
+        self.async_write_ha_state()
 
     @property
     def brightness(self) -> int | None:
@@ -158,9 +159,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
 
         # Optimistically reflect the new state immediately.
+        # Do not trigger a coordinator refresh — the device shadow takes time
+        # to update, so polling immediately would flip the state back to off.
         self._attr_is_on = True
         self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
@@ -169,4 +171,3 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         # Optimistically reflect the new state immediately.
         self._attr_is_on = False
         self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
