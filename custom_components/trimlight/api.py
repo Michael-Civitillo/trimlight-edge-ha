@@ -85,8 +85,8 @@ class TrimlightApi:
     async def get_device(self, device_id: str) -> dict:
         """Return full detail for a single device (effects, schedules, etc.)."""
         return await self._request(
-            "POST",
-            "/v1/oauth/resources/device/get",
+            "GET",
+            "/v1/oauth/resources/device",
             {"deviceId": device_id},
         )
 
