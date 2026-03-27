@@ -43,7 +43,9 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict]):
             await self.api.notify_update_shadow(device_id)
             try:
                 detail = await self.api.get_device(device_id)
-                result[device_id] = {**device, **detail}
+                merged = {**device, **detail}
+                _LOGGER.debug("Device %s full data: %s", device_id, merged)
+                result[device_id] = merged
             except TrimlightApiError as err:
                 _LOGGER.warning(
                     "Could not fetch detail for device %s: %s", device_id, err
