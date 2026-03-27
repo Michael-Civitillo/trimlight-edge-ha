@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import time
+from datetime import datetime
 from typing import Any
 
 import aiohttp
@@ -82,12 +83,28 @@ class TrimlightApi:
         )
         return payload["data"]
 
+    @staticmethod
+    def _current_date() -> dict:
+        """Return the current date/time dict the API expects."""
+        now = datetime.now()
+        # API weekday: SUNDAY=1 … SATURDAY=7; Python isoweekday: MON=1 … SUN=7
+        weekday = now.isoweekday() % 7 + 1  # converts to API convention
+        return {
+            "year": now.year - 2000,
+            "month": now.month,
+            "day": now.day,
+            "weekday": weekday,
+            "hours": now.hour,
+            "minutes": now.minute,
+            "seconds": now.second,
+        }
+
     async def get_device(self, device_id: str) -> dict:
         """Return full detail for a single device (effects, schedules, etc.)."""
         return await self._request(
             "POST",
             "/v1/oauth/resources/device/get",
-            {"deviceId": device_id},
+            {"deviceId": device_id, "currentDate": self._current_date()},
         )
 
     async def notify_update_shadow(self, device_id: str) -> None:
@@ -96,7 +113,7 @@ class TrimlightApi:
             await self._request(
                 "GET",
                 "/v1/oauth/resources/device/notify-update-shadow",
-                {"deviceId": device_id},
+                {"deviceId": device_id, "currentDate": self._current_date()},
             )
         except TrimlightApiError:
             # Non-critical; best-effort

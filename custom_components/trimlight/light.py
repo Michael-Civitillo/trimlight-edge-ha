@@ -96,9 +96,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         """Device is available only when online."""
         return self._data.get("connectivity", 0) == 1
 
-    @property
-    def is_on(self) -> bool:
-        return self._data.get("switchState", 0) != SWITCH_STATE_OFF
+    def _handle_coordinator_update(self) -> None:
+        """Update state from coordinator data, preserving optimistic writes."""
+        self._attr_is_on = self._data.get("switchState", SWITCH_STATE_OFF) != SWITCH_STATE_OFF
+        self.async_write_ha_state()
 
     @property
     def brightness(self) -> int | None:
@@ -136,8 +137,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 self._active_effect_name = effect_name
 
         if brightness is not None:
-            # Preview the current effect with a new brightness level.
-            # currentEffect gives us the running effect parameters.
             current = self._data.get("currentEffect", {})
             if current:
                 preview: dict[str, Any] = {
@@ -147,11 +146,8 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     "brightness": brightness,
                 }
                 if current.get("category") == 0:
-                    # Build-in effect: include pixelLen and reverse
                     preview["pixelLen"] = current.get("pixelLen", 30)
                     preview["reverse"] = current.get("reverse", False)
-                # Custom effects (category 1) require pixel data which isn't
-                # available in currentEffect, so we skip the preview in that case.
                 if current.get("category") == 0:
                     await api.preview_effect(self._device_id, preview)
             else:
@@ -160,13 +156,18 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     self._device_id,
                 )
 
-        # Ensure the light is actually on (manual mode).
-        if not self.is_on:
-            await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+        await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
 
-        await self.coordinator.async_request_refresh()
+        # Optimistically reflect the new state immediately.
+        # Do not trigger a coordinator refresh — the device shadow takes time
+        # to update, so polling immediately would flip the state back to off.
+        self._attr_is_on = True
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
-        await self.coordinator.async_request_refresh()
+
+        # Optimistically reflect the new state immediately.
+        self._attr_is_on = False
+        self.async_write_ha_state()
