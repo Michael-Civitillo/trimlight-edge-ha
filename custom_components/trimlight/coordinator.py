@@ -39,18 +39,18 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict]):
         result: dict = {}
         for device in devices:
             device_id = device["deviceId"]
+            _LOGGER.debug("Device list-level data: %s", device)
             # Notify the device to push fresh shadow data, then fetch detail.
             await self.api.notify_update_shadow(device_id)
             try:
                 detail = await self.api.get_device(device_id)
                 merged = {**device, **detail}
-                _LOGGER.debug("Device %s full data: %s", device_id, merged)
+                _LOGGER.debug("Device %s detail data: %s", device_id, detail)
                 result[device_id] = merged
             except TrimlightApiError as err:
                 _LOGGER.warning(
                     "Could not fetch detail for device %s: %s", device_id, err
                 )
-                # Keep list-level data so the entity remains (unavailable).
                 result[device_id] = device
 
         return result
