@@ -136,8 +136,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 self._active_effect_name = effect_name
 
         if brightness is not None:
-            # Preview the current effect with a new brightness level.
-            # currentEffect gives us the running effect parameters.
             current = self._data.get("currentEffect", {})
             if current:
                 preview: dict[str, Any] = {
@@ -147,11 +145,8 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     "brightness": brightness,
                 }
                 if current.get("category") == 0:
-                    # Build-in effect: include pixelLen and reverse
                     preview["pixelLen"] = current.get("pixelLen", 30)
                     preview["reverse"] = current.get("reverse", False)
-                # Custom effects (category 1) require pixel data which isn't
-                # available in currentEffect, so we skip the preview in that case.
                 if current.get("category") == 0:
                     await api.preview_effect(self._device_id, preview)
             else:
@@ -160,13 +155,18 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     self._device_id,
                 )
 
-        # Ensure the light is actually on (manual mode).
-        if not self.is_on:
-            await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+        await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
 
+        # Optimistically reflect the new state immediately.
+        self._attr_is_on = True
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
+
+        # Optimistically reflect the new state immediately.
+        self._attr_is_on = False
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
