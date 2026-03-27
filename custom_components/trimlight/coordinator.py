@@ -1,6 +1,7 @@
 """DataUpdateCoordinator for Trimlight Edge."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 
@@ -40,6 +41,11 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict]):
         for device in devices:
             device_id = device["deviceId"]
             _LOGGER.debug("Device list-level data: %s", device)
+            try:
+                with open("/config/trimlight_debug.json", "w") as f:
+                    json.dump(device, f, indent=2)
+            except Exception:
+                pass
             # Notify the device to push fresh shadow data, then fetch detail.
             await self.api.notify_update_shadow(device_id)
             try:
