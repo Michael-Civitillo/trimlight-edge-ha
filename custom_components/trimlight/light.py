@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS,
     ATTR_EFFECT,
     ColorMode,
     LightEntity,
@@ -49,8 +48,8 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
       • effect selection from the effects saved on the device
     """
 
-    _attr_color_mode = ColorMode.BRIGHTNESS
-    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+    _attr_color_mode = ColorMode.ONOFF
+    _attr_supported_color_modes = {ColorMode.ONOFF}
     _attr_supported_features = LightEntityFeature.EFFECT
     _attr_has_entity_name = True
     _attr_name = None  # device name is used as entity name via has_entity_name
@@ -126,14 +125,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self.async_write_ha_state()
 
     @property
-    def brightness(self) -> int | None:
-        """Return brightness from the currently running effect (0-255)."""
-        current = self._data.get("currentEffect")
-        if current:
-            return current.get("brightness")
-        return None
-
-    @property
     def effect_list(self) -> list[str]:
         return [e["name"] for e in self._effects]
 
@@ -147,18 +138,21 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     # ------------------------------------------------------------------ #
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the light, optionally setting an effect and/or brightness."""
+        """Turn on the light, optionally selecting a saved effect.
+
+        Note: preview_effect is not used because the device rejects category 0
+        (built-in) and only supports category 2 (holiday presets) via view_effect.
+        """
         api = self.coordinator.api
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
-        brightness: int | None = kwargs.get(ATTR_BRIGHTNESS)
 
-        # Hold optimistic state immediately so coordinator can't flip it back
-        # regardless of what happens below.
+        # Optimistic update first — holds state for 60s regardless of API outcome.
         self._last_command_time = time.monotonic()
         self._attr_is_on = True
         self.async_write_ha_state()
 
         if effect_name is not None:
+            # Activate a specific named saved effect.
             effect = self._effect_by_name(effect_name)
             if effect is None:
                 _LOGGER.error(
@@ -170,21 +164,15 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     self._active_effect_name = effect_name
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
-
-        if brightness is not None:
-            current = self._data.get("currentEffect", {})
-            preview: dict[str, Any] = {
-                "category": current.get("category", 0),
-                "mode": current.get("mode", 0),
-                "speed": current.get("speed", 100),
-                "brightness": brightness,
-                "pixelLen": current.get("pixelLen", 30),
-                "reverse": current.get("reverse", False),
-            }
-            try:
-                await api.preview_effect(self._device_id, preview)
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.error("Failed to set brightness on %s: %s", self._device_id, err)
+        else:
+            # Plain turn-on: activate the first saved effect so the device
+            # knows what to display in manual mode.
+            effects = self._effects
+            if effects:
+                try:
+                    await api.view_effect(self._device_id, effects[0]["id"])
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Failed to view effect on %s: %s", self._device_id, err)
 
         try:
             await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
