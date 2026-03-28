@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.light import (
@@ -21,6 +22,9 @@ from .const import DOMAIN, SWITCH_STATE_MANUAL, SWITCH_STATE_OFF
 from .coordinator import TrimlightCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds to hold optimistic state after a command before trusting API state.
+_COMMAND_COOLDOWN = 60
 
 
 async def async_setup_entry(
@@ -58,9 +62,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self._device_id = device_id
         self._attr_unique_id = device_id
         # Track the name of the currently active effect locally.
-        # The API's currentEffect object doesn't include name/id, so we
-        # remember the last effect the user selected via HA.
         self._active_effect_name: str | None = None
+        # Timestamp of the last command sent — used to hold optimistic state.
+        self._last_command_time: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -97,8 +101,28 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         return self._data.get("connectivity", 0) == 1
 
     def _handle_coordinator_update(self) -> None:
-        """Update state from coordinator data, preserving optimistic writes."""
-        self._attr_is_on = self._data.get("switchState", SWITCH_STATE_OFF) != SWITCH_STATE_OFF
+        """Update state from coordinator data.
+
+        Holds the optimistic state for _COMMAND_COOLDOWN seconds after any
+        command so the API shadow has time to reflect the change before we
+        trust it again.
+        """
+        seconds_since_command = time.monotonic() - self._last_command_time
+        if seconds_since_command > _COMMAND_COOLDOWN:
+            # Enough time has passed — trust the API state.
+            switch_state = self._data.get("switchState")
+            if switch_state is not None:
+                self._attr_is_on = switch_state != SWITCH_STATE_OFF
+                _LOGGER.debug(
+                    "Device %s switchState=%s is_on=%s",
+                    self._device_id, switch_state, self._attr_is_on,
+                )
+        else:
+            _LOGGER.debug(
+                "Device %s holding optimistic state for %ds more",
+                self._device_id,
+                int(_COMMAND_COOLDOWN - seconds_since_command),
+            )
         self.async_write_ha_state()
 
     @property
@@ -131,7 +155,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         if effect_name is not None:
             effect = self._effect_by_name(effect_name)
             if effect is None:
-                _LOGGER.error("Effect '%s' not found on device %s", effect_name, self._device_id)
+                _LOGGER.error(
+                    "Effect '%s' not found on device %s", effect_name, self._device_id
+                )
             else:
                 await api.view_effect(self._device_id, effect["id"])
                 self._active_effect_name = effect_name
@@ -148,7 +174,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 if current.get("category") == 0:
                     preview["pixelLen"] = current.get("pixelLen", 30)
                     preview["reverse"] = current.get("reverse", False)
-                if current.get("category") == 0:
                     await api.preview_effect(self._device_id, preview)
             else:
                 _LOGGER.debug(
@@ -156,18 +181,24 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     self._device_id,
                 )
 
-        await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+        try:
+            await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
+            return
 
-        # Optimistically reflect the new state immediately.
-        # Do not trigger a coordinator refresh — the device shadow takes time
-        # to update, so polling immediately would flip the state back to off.
+        self._last_command_time = time.monotonic()
         self._attr_is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
-        await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
+        try:
+            await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to turn off %s: %s", self._device_id, err)
+            return
 
-        # Optimistically reflect the new state immediately.
+        self._last_command_time = time.monotonic()
         self._attr_is_on = False
         self.async_write_ha_state()
