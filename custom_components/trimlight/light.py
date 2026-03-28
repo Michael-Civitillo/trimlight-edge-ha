@@ -167,7 +167,19 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             self._active_effect_name = None
         self.async_write_ha_state()
 
-        if hs_color is not None:
+        if effect_name is not None:
+            # Effect takes highest priority — even if HA also sends hs_color.
+            effect = self._effect_by_name(effect_name)
+            if effect is None:
+                _LOGGER.error("Effect '%s' not found on device %s", effect_name, self._device_id)
+            else:
+                try:
+                    await api.view_effect(self._device_id, effect["id"])
+                    self._active_effect_name = effect_name
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
+
+        elif hs_color is not None:
             # Solid color via custom static effect preview (category 1, mode 0 = STATIC).
             color_int = _hs_to_api_color(hs_color)
             pixel_count = self._total_pixels()
@@ -186,17 +198,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error("Failed to set color on %s: %s", self._device_id, err)
-
-        elif effect_name is not None:
-            effect = self._effect_by_name(effect_name)
-            if effect is None:
-                _LOGGER.error("Effect '%s' not found on device %s", effect_name, self._device_id)
-            else:
-                try:
-                    await api.view_effect(self._device_id, effect["id"])
-                    self._active_effect_name = effect_name
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
 
         else:
             # Plain turn-on: activate first saved effect.
