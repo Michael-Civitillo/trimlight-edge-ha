@@ -147,19 +147,18 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     # ------------------------------------------------------------------ #
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the light, optionally setting an effect and/or brightness.
-
-        The Trimlight device requires an active effect to display when entering
-        manual mode.  If no effect is specified we resume the last known effect
-        from the coordinator, falling back to a safe built-in default so the
-        lights actually illuminate.
-        """
+        """Turn on the light, optionally setting an effect and/or brightness."""
         api = self.coordinator.api
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
         brightness: int | None = kwargs.get(ATTR_BRIGHTNESS)
 
+        # Hold optimistic state immediately so coordinator can't flip it back
+        # regardless of what happens below.
+        self._last_command_time = time.monotonic()
+        self._attr_is_on = True
+        self.async_write_ha_state()
+
         if effect_name is not None:
-            # Activate a named saved effect.
             effect = self._effect_by_name(effect_name)
             if effect is None:
                 _LOGGER.error(
@@ -168,13 +167,11 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             else:
                 try:
                     await api.view_effect(self._device_id, effect["id"])
+                    self._active_effect_name = effect_name
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
-                    return
-                self._active_effect_name = effect_name
 
-        elif brightness is not None:
-            # Brightness-only adjust — keep current effect, update brightness.
+        if brightness is not None:
             current = self._data.get("currentEffect", {})
             preview: dict[str, Any] = {
                 "category": current.get("category", 0),
@@ -188,57 +185,19 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 await api.preview_effect(self._device_id, preview)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error("Failed to set brightness on %s: %s", self._device_id, err)
-                return
 
-        else:
-            # Plain turn-on: resume last known effect or use a built-in default.
-            current = self._data.get("currentEffect")
-            if current:
-                resume: dict[str, Any] = {
-                    "category": current.get("category", 0),
-                    "mode": current.get("mode", 0),
-                    "speed": current.get("speed", 100),
-                    "brightness": current.get("brightness", 255),
-                    "pixelLen": current.get("pixelLen", 30),
-                    "reverse": current.get("reverse", False),
-                }
-                _LOGGER.debug("Resuming last effect on %s: %s", self._device_id, resume)
-            else:
-                # No prior effect known — default to Rainbow Gradual Chase.
-                resume = {
-                    "category": 0,
-                    "mode": 0,
-                    "speed": 100,
-                    "brightness": 255,
-                    "pixelLen": 30,
-                    "reverse": False,
-                }
-                _LOGGER.debug("No prior effect for %s; using default built-in", self._device_id)
-            try:
-                await api.preview_effect(self._device_id, resume)
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
-                return
-
-        # Set manual mode so the device stays on after the preview/effect.
         try:
             await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to set switch state on %s: %s", self._device_id, err)
-            return
-
-        self._last_command_time = time.monotonic()
-        self._attr_is_on = True
-        self.async_write_ha_state()
+            _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        self._last_command_time = time.monotonic()
+        self._attr_is_on = False
+        self.async_write_ha_state()
+
         try:
             await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Failed to turn off %s: %s", self._device_id, err)
-            return
-
-        self._last_command_time = time.monotonic()
-        self._attr_is_on = False
-        self.async_write_ha_state()
