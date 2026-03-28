@@ -7,13 +7,14 @@
 
 I built this integration because I have Trimlight Edge lights on my house and wanted to control them from Home Assistant like everything else. No official HA integration existed, so I made one.
 
-This connects to the Trimlight cloud API and exposes each of your controllers as a light entity — on/off, brightness, and switching between your saved effects. If you have Trimlight Edge lights and run Home Assistant, this is for you.
+This connects to the Trimlight cloud API and exposes each of your controllers as a light entity — on/off, color picker, brightness, and switching between your saved effects. If you have Trimlight Edge lights and run Home Assistant, this is for you.
 
 ---
 
 ## What You Can Do
 
 - Turn lights **on and off**
+- **Color picker** — pick any color and it applies as a solid static effect
 - Adjust **brightness**
 - Switch between any **effects saved on the device** (up to 60)
 - All your devices show up automatically — no manual configuration per device
@@ -134,8 +135,8 @@ The point is — once your Trimlight is in HA, it plays nicely with everything e
 ## Known Limitations
 
 - **Effect name after app changes** — if you switch effects in the Trimlight app, HA won't know the name of the new effect until you pick one through HA. The API doesn't include effect names in the running state.
-- **Brightness on custom effects** — brightness adjustment only works with built-in effects (the 180 factory presets). Custom effects need pixel-level data that the API doesn't expose in the current state.
 - **Cloud only** — there's no local API. Everything goes through Trimlight's servers. If their cloud is down, your lights will show as unavailable in HA (but will still work from the app and their own timers).
+- **Rate limiting** — the Trimlight API rejects rapid concurrent requests. The integration throttles calls with a 300ms minimum gap. Very fast color changes from the HA UI are smoothed out automatically.
 
 ---
 
