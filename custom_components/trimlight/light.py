@@ -80,6 +80,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self._attr_unique_id = device_id
         self._active_effect_name: str | None = None
         self._last_command_time: float = 0.0
+        # Cached ID of the "HA Color" effect slot on the device.
+        # Populated on first save so rapid color changes reuse the same slot
+        # without waiting for a coordinator poll.
+        self._color_effect_id: int | None = None
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -192,9 +196,16 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 for i in range(30)
             ]
 
-            # Reuse existing "HA Color" slot to avoid filling up device storage.
-            existing = self._effect_by_name("HA Color")
-            effect_id = existing["id"] if existing else -1
+            # Reuse the cached "HA Color" slot, falling back to the effects
+            # list (after a coordinator poll), then creating a new slot.
+            # The in-memory cache means rapid color changes never create
+            # duplicate effects regardless of coordinator timing.
+            if self._color_effect_id is None:
+                existing = self._effect_by_name("HA Color")
+                if existing:
+                    self._color_effect_id = existing["id"]
+
+            effect_id = self._color_effect_id if self._color_effect_id is not None else -1
 
             try:
                 result = await api.save_effect(
@@ -209,9 +220,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                         "pixels": pixels,
                     },
                 )
-                # Use returned ID for new effects, or existing ID for updates.
                 saved_id = (result or {}).get("id", effect_id)
                 if saved_id and saved_id != -1:
+                    self._color_effect_id = saved_id  # cache for future calls
                     await api.view_effect(self._device_id, saved_id)
                     self._active_effect_name = "HA Color"
             except Exception as err:  # noqa: BLE001
