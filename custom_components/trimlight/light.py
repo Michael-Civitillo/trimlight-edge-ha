@@ -219,7 +219,12 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 saved_id = (result or {}).get("id", effect_id)
                 if saved_id and saved_id != -1:
                     self._color_effect_id = saved_id
-                    await api.view_effect(self._device_id, saved_id)
+                    # Only call view_effect the first time to activate the
+                    # "HA Color" slot. After that, save_effect alone updates
+                    # the running pattern — halves the API calls so rapid
+                    # color changes don't overwhelm the device.
+                    if self._active_effect_name != "HA Color":
+                        await api.view_effect(self._device_id, saved_id)
                     self._active_effect_name = "HA Color"
                     _LOGGER.debug("Color set on %s — id=%s, brightness=%s", self._device_id, saved_id, use_brightness)
                 else:

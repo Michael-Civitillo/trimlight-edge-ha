@@ -34,6 +34,7 @@ class TrimlightApi:
         # Serialize all requests — the Trimlight server returns 20000 on
         # concurrent calls from the same client.
         self._lock = asyncio.Lock()
+        self._last_request_time: float = 0.0
 
     def _build_headers(self) -> dict[str, str]:
         """Build auth headers per the HMAC-SHA256 scheme.
@@ -65,6 +66,11 @@ class TrimlightApi:
         Note: The API uses JSON bodies even for GET requests, as documented.
         """
         async with self._lock:
+            # Small delay between requests — the device firmware chokes
+            # on rapid back-to-back calls even when serialized.
+            elapsed = time.monotonic() - self._last_request_time
+            if elapsed < 0.3:
+                await asyncio.sleep(0.3 - elapsed)
             url = f"{API_BASE_URL}{path}"
             headers = self._build_headers()
             async with async_timeout.timeout(10):
@@ -72,6 +78,7 @@ class TrimlightApi:
                     method, url, headers=headers, json=data
                 )
                 result = await resp.json()
+            self._last_request_time = time.monotonic()
         code = result.get("code")
         if code != 0:
             raise TrimlightApiError(
