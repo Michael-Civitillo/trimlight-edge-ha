@@ -98,7 +98,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Update state from coordinator data, preserving optimistic writes."""
-        self._attr_is_on = self._data.get("state", 0) != SWITCH_STATE_OFF
+        self._attr_is_on = self._data.get("switchState", SWITCH_STATE_OFF) != SWITCH_STATE_OFF
         self.async_write_ha_state()
 
     @property
