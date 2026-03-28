@@ -1,6 +1,7 @@
 """Trimlight Edge API client."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -30,6 +31,9 @@ class TrimlightApi:
         self._client_id = client_id
         self._client_secret = client_secret
         self._session = session
+        # Serialize all requests — the Trimlight server returns 20000 on
+        # concurrent calls from the same client.
+        self._lock = asyncio.Lock()
 
     def _build_headers(self) -> dict[str, str]:
         """Build auth headers per the HMAC-SHA256 scheme.
@@ -56,15 +60,18 @@ class TrimlightApi:
     ) -> Any:
         """Make an authenticated request.
 
+        Requests are serialized via a lock — the Trimlight server crashes
+        (error 20000) when it receives concurrent requests from the same client.
         Note: The API uses JSON bodies even for GET requests, as documented.
         """
-        url = f"{API_BASE_URL}{path}"
-        headers = self._build_headers()
-        async with async_timeout.timeout(10):
-            resp = await self._session.request(
-                method, url, headers=headers, json=data
-            )
-            result = await resp.json()
+        async with self._lock:
+            url = f"{API_BASE_URL}{path}"
+            headers = self._build_headers()
+            async with async_timeout.timeout(10):
+                resp = await self._session.request(
+                    method, url, headers=headers, json=data
+                )
+                result = await resp.json()
         code = result.get("code")
         if code != 0:
             raise TrimlightApiError(
