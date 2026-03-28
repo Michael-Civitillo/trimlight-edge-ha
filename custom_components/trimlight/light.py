@@ -173,16 +173,21 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
 
-        elif hs_color is not None:
-            # Solid color: save/update an "HA Color" effect then view it.
-            # All effects on this device use category 2, mode 0 (STATIC),
-            # with count=1 for solid colors (pattern repeats across strip).
-            color_int = _hs_to_api_color(hs_color)
+        elif hs_color is not None or brightness is not None:
+            # Color and/or brightness change. Use the new values or fall back
+            # to the current state so brightness-only changes keep the color
+            # and color-only changes keep the brightness.
+            use_hs = hs_color if hs_color is not None else self._attr_hs_color
+            use_brightness = brightness if brightness is not None else self._attr_brightness
+            color_int = _hs_to_api_color(use_hs)
+
             _LOGGER.debug(
-                "Setting color on %s — hs=%s, rgb_int=%s",
-                self._device_id, hs_color, color_int,
+                "Setting color on %s — hs=%s, brightness=%s, rgb_int=%s",
+                self._device_id, use_hs, use_brightness, color_int,
             )
 
+            # All effects on this device use category 2, mode 0 (STATIC),
+            # with count=1 for solid colors (pattern repeats across strip).
             pixels = [
                 {"index": i, "count": 1 if i == 0 else 0,
                  "color": color_int if i == 0 else 0, "disable": False}
@@ -199,10 +204,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             effect_id = self._color_effect_id if self._color_effect_id is not None else -1
 
             try:
-                _LOGGER.debug(
-                    "Calling save_effect on %s — id=%s, color=%s",
-                    self._device_id, effect_id, color_int,
-                )
                 result = await api.save_effect(
                     self._device_id,
                     {
@@ -211,38 +212,44 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                         "category": 2,
                         "mode": 0,
                         "speed": 127,
-                        "brightness": 255,
+                        "brightness": use_brightness,
                         "pixels": pixels,
                     },
                 )
-                _LOGGER.debug("save_effect returned: %s", result)
                 saved_id = (result or {}).get("id", effect_id)
                 if saved_id and saved_id != -1:
                     self._color_effect_id = saved_id
-                    _LOGGER.debug("Calling view_effect on %s — id=%s", self._device_id, saved_id)
                     await api.view_effect(self._device_id, saved_id)
                     self._active_effect_name = "HA Color"
-                    _LOGGER.debug("Color set successfully on %s", self._device_id)
+                    _LOGGER.debug("Color set on %s — id=%s, brightness=%s", self._device_id, saved_id, use_brightness)
                 else:
                     _LOGGER.error("save_effect returned invalid id: %s", saved_id)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error("Failed to set color on %s: %s", self._device_id, err)
 
         else:
-            # Plain turn-on: activate first saved effect (which also turns on
-            # the device). Only fall back to set_switch_state if no effects exist.
-            effects = self._effects
-            if effects:
+            # Plain turn-on (no color, no brightness, no effect):
+            # Re-activate the current "HA Color" if we have one, otherwise
+            # activate the first saved effect.
+            if self._color_effect_id is not None:
                 try:
-                    await api.view_effect(self._device_id, effects[0]["id"])
-                    _LOGGER.debug("Plain turn-on: activated effect '%s'", effects[0]["name"])
+                    await api.view_effect(self._device_id, self._color_effect_id)
+                    _LOGGER.debug("Plain turn-on: re-activated HA Color id=%s", self._color_effect_id)
                 except Exception as err:  # noqa: BLE001
-                    _LOGGER.error("Failed to view effect on %s: %s", self._device_id, err)
+                    _LOGGER.error("Failed to view HA Color on %s: %s", self._device_id, err)
             else:
-                try:
-                    await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
-                except Exception as err:  # noqa: BLE001
-                    _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
+                effects = self._effects
+                if effects:
+                    try:
+                        await api.view_effect(self._device_id, effects[0]["id"])
+                        _LOGGER.debug("Plain turn-on: activated effect '%s'", effects[0]["name"])
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.error("Failed to view effect on %s: %s", self._device_id, err)
+                else:
+                    try:
+                        await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
