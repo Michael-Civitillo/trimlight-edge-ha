@@ -169,14 +169,15 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             # then activate it via view_effect. preview_effect is broken on
             # this firmware. view_effect also turns the device on.
             #
-            # API docs: pixel count range is [0, 60], category 1 = custom effect,
-            # mode 0 = STATIC. Use max count (60) to fill the strip pattern.
+            # API docs: pixel index range [0, 29], count range [0, 60].
+            # Category 1 = custom effect, mode 0 = STATIC.
+            # STATIC mode does NOT repeat — it plays the pattern once. So we
+            # fill ALL 30 entries × 60 count = 1800 pixels of solid color,
+            # enough to cover any residential strip.
             color_int = _hs_to_api_color(hs_color)
 
-            # Build 30-entry pixel array: first entry fills with color, rest empty.
             pixels = [
-                {"index": i, "count": 60 if i == 0 else 0,
-                 "color": color_int if i == 0 else 0, "disable": False}
+                {"index": i, "count": 60, "color": color_int, "disable": False}
                 for i in range(30)
             ]
 
