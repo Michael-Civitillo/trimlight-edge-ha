@@ -146,14 +146,14 @@ class TrimlightApi:
             {"deviceId": device_id, "payload": {"id": effect_id}},
         )
 
-    async def preview_effect(self, device_id: str, effect_payload: dict) -> None:
-        """Preview (play) an effect without saving it.
+    async def save_effect(self, device_id: str, effect_payload: dict) -> dict:
+        """Save (create or update) an effect on the device.
 
-        Used for real-time brightness / colour adjustments.
-        effect_payload must match the build-in or custom effect schema.
+        Set effect_payload["id"] = -1 to create new, or an existing ID to update.
+        Returns the payload containing the saved effect's id.
         """
-        await self._request(
+        return await self._request(
             "POST",
-            "/v1/oauth/resources/device/effect/preview",
+            "/v1/oauth/resources/device/effect/save",
             {"deviceId": device_id, "payload": effect_payload},
         )

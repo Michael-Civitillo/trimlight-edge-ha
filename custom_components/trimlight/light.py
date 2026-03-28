@@ -180,22 +180,40 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
 
         elif hs_color is not None:
-            # Solid color via custom static effect preview (category 1, mode 0 = STATIC).
+            # Solid color: save/update an "HA Color" effect on the device,
+            # then activate it. preview_effect is broken on this firmware.
             color_int = _hs_to_api_color(hs_color)
             pixel_count = self._total_pixels()
+
+            # Build 30-entry pixel array matching the device's effect format.
+            pixels = [
+                {"index": i, "count": pixel_count if i == 0 else 0,
+                 "color": color_int if i == 0 else 0, "disable": False}
+                for i in range(30)
+            ]
+
+            # Reuse existing "HA Color" slot to avoid filling up device storage.
+            existing = self._effect_by_name("HA Color")
+            effect_id = existing["id"] if existing else -1
+
             try:
-                await api.preview_effect(
+                result = await api.save_effect(
                     self._device_id,
                     {
-                        "category": 1,
+                        "id": effect_id,
+                        "name": "HA Color",
+                        "category": 2,
                         "mode": 0,
-                        "speed": 128,
+                        "speed": 127,
                         "brightness": 255,
-                        "pixels": [
-                            {"index": 0, "count": pixel_count, "color": color_int, "disable": False}
-                        ],
+                        "pixels": pixels,
                     },
                 )
+                # Use returned ID for new effects, or existing ID for updates.
+                saved_id = (result or {}).get("id", effect_id)
+                if saved_id and saved_id != -1:
+                    await api.view_effect(self._device_id, saved_id)
+                    self._active_effect_name = "HA Color"
             except Exception as err:  # noqa: BLE001
                 _LOGGER.error("Failed to set color on %s: %s", self._device_id, err)
 
