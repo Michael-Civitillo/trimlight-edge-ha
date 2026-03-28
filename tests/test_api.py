@@ -1,4 +1,5 @@
 """Tests for the Trimlight API client."""
+
 import base64
 import hashlib
 import hmac
@@ -11,11 +12,14 @@ from custom_components.trimlight.api import TrimlightApi, TrimlightApiError
 
 @pytest.fixture
 def api():
+    """Return a TrimlightApi instance with a mocked session."""
     session = MagicMock()
     return TrimlightApi("my_client", "my_secret", session)
 
 
 class TestBuildHeaders:
+    """Tests for the HMAC-SHA256 auth header generation."""
+
     def test_contains_required_keys(self, api):
         headers = api._build_headers()
         assert "authorization" in headers
@@ -33,8 +37,7 @@ class TestBuildHeaders:
 
     def test_token_is_valid_base64(self, api):
         headers = api._build_headers()
-        # Should not raise
-        base64.b64decode(headers["authorization"])
+        base64.b64decode(headers["authorization"])  # Should not raise.
 
     def test_token_matches_hmac_computation(self, api):
         with patch("time.time", return_value=1713166849.256):
@@ -50,10 +53,14 @@ class TestBuildHeaders:
 
 
 class TestRequest:
+    """Tests for the underlying _request method."""
+
     @pytest.mark.asyncio
     async def test_raises_on_nonzero_code(self, api):
         mock_resp = AsyncMock()
-        mock_resp.json = AsyncMock(return_value={"code": 10001, "desc": "auth error"})
+        mock_resp.json = AsyncMock(
+            return_value={"code": 10001, "desc": "auth error"}
+        )
         api._session.request = AsyncMock(return_value=mock_resp)
 
         with pytest.raises(TrimlightApiError, match="10001"):
@@ -81,6 +88,8 @@ class TestRequest:
 
 
 class TestGetDevices:
+    """Tests for the get_devices method."""
+
     @pytest.mark.asyncio
     async def test_returns_device_list(self, api):
         devices = [{"deviceId": "abc", "name": "Front"}]
@@ -95,12 +104,31 @@ class TestGetDevices:
 
 
 class TestNotifyUpdateShadow:
+    """Tests for the notify_update_shadow method."""
+
     @pytest.mark.asyncio
     async def test_swallows_api_error(self, api):
         """notify_update_shadow should not propagate errors — it's best-effort."""
         mock_resp = AsyncMock()
-        mock_resp.json = AsyncMock(return_value={"code": 10001, "desc": "error"})
+        mock_resp.json = AsyncMock(
+            return_value={"code": 10001, "desc": "error"}
+        )
         api._session.request = AsyncMock(return_value=mock_resp)
 
-        # Should not raise
+        # Should not raise.
         await api.notify_update_shadow("device_123")
+
+
+class TestSaveEffect:
+    """Tests for the save_effect method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_saved_id(self, api):
+        mock_resp = AsyncMock()
+        mock_resp.json = AsyncMock(
+            return_value={"code": 0, "payload": {"id": 42}}
+        )
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        result = await api.save_effect("device_123", {"id": -1, "name": "Test"})
+        assert result == {"id": 42}

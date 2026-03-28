@@ -1,8 +1,10 @@
 """DataUpdateCoordinator for Trimlight Edge."""
+
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -13,12 +15,12 @@ from .const import DOMAIN, UPDATE_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 
-class TrimlightCoordinator(DataUpdateCoordinator[dict]):
+class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Polls all devices for a single Trimlight account.
 
     coordinator.data is a dict keyed by deviceId, each value being a merged
     dict of the list-level fields (name, switchState, connectivity, state,
-    fwVersionName) and the detail-level fields (effects, currentEffect, …).
+    fwVersionName) and the detail-level fields (effects, currentEffect, etc.).
     """
 
     def __init__(self, hass: HomeAssistant, api: TrimlightApi) -> None:
@@ -30,22 +32,26 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict]):
         )
         self.api = api
 
-    async def _async_update_data(self) -> dict:
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from the Trimlight API."""
         try:
             devices = await self.api.get_devices()
         except TrimlightApiError as err:
-            raise UpdateFailed(f"Failed to list Trimlight devices: {err}") from err
+            raise UpdateFailed(
+                f"Failed to list Trimlight devices: {err}"
+            ) from err
 
-        result: dict = {}
+        result: dict[str, Any] = {}
         for device in devices:
-            device_id = device["deviceId"]
+            device_id: str = device["deviceId"]
             _LOGGER.debug("Device list-level data: %s", device)
+
             # Notify the device to push fresh shadow data, then fetch detail.
             await self.api.notify_update_shadow(device_id)
             try:
                 detail = await self.api.get_device(device_id)
                 merged = {**device, **detail}
-                _LOGGER.debug("Device %s detail data: %s", device_id, detail)
+                _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
                 result[device_id] = merged
             except TrimlightApiError as err:
                 _LOGGER.warning(

@@ -1,22 +1,30 @@
-"""Trimlight Edge API client."""
+"""Trimlight Edge API client.
+
+Implements the Trimlight V2 OAuth API (HMAC-SHA256 auth).
+All requests are serialized via an asyncio lock — the Trimlight server
+returns error 20000 when it receives concurrent requests from the same client.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import base64
 import hashlib
 import hmac
+import logging
 import time
 from datetime import datetime
 from typing import Any
 
 import aiohttp
-import async_timeout
 
-from .const import API_BASE_URL
+from .const import API_BASE_URL, API_REQUEST_MIN_INTERVAL
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class TrimlightApiError(Exception):
-    """Raised when the Trimlight API returns an error."""
+    """Raised when the Trimlight API returns a non-zero result code."""
 
 
 class TrimlightApi:
@@ -31,8 +39,6 @@ class TrimlightApi:
         self._client_id = client_id
         self._client_secret = client_secret
         self._session = session
-        # Serialize all requests — the Trimlight server returns 20000 on
-        # concurrent calls from the same client.
         self._lock = asyncio.Lock()
         self._last_request_time: float = 0.0
 
@@ -61,24 +67,23 @@ class TrimlightApi:
     ) -> Any:
         """Make an authenticated request.
 
-        Requests are serialized via a lock — the Trimlight server crashes
-        (error 20000) when it receives concurrent requests from the same client.
-        Note: The API uses JSON bodies even for GET requests, as documented.
+        Requests are serialized via a lock and rate-limited to prevent
+        the Trimlight server from returning error 20000.
         """
         async with self._lock:
-            # Small delay between requests — the device firmware chokes
-            # on rapid back-to-back calls even when serialized.
             elapsed = time.monotonic() - self._last_request_time
-            if elapsed < 0.3:
-                await asyncio.sleep(0.3 - elapsed)
+            if elapsed < API_REQUEST_MIN_INTERVAL:
+                await asyncio.sleep(API_REQUEST_MIN_INTERVAL - elapsed)
+
             url = f"{API_BASE_URL}{path}"
             headers = self._build_headers()
-            async with async_timeout.timeout(10):
+            async with asyncio.timeout(10):
                 resp = await self._session.request(
                     method, url, headers=headers, json=data
                 )
                 result = await resp.json()
             self._last_request_time = time.monotonic()
+
         code = result.get("code")
         if code != 0:
             raise TrimlightApiError(
@@ -102,7 +107,7 @@ class TrimlightApi:
         """Return the current date/time dict the API expects."""
         now = datetime.now()
         # API weekday: SUNDAY=1 … SATURDAY=7; Python isoweekday: MON=1 … SUN=7
-        weekday = now.isoweekday() % 7 + 1  # converts to API convention
+        weekday = now.isoweekday() % 7 + 1
         return {
             "year": now.year - 2000,
             "month": now.month,
@@ -130,8 +135,7 @@ class TrimlightApi:
                 {"deviceId": device_id, "currentDate": self._current_date()},
             )
         except TrimlightApiError:
-            # Non-critical; best-effort
-            pass
+            pass  # Non-critical; best-effort
 
     # ------------------------------------------------------------------ #
     # Device control                                                       #
@@ -151,14 +155,6 @@ class TrimlightApi:
             "POST",
             "/v1/oauth/resources/device/effect/view",
             {"deviceId": device_id, "payload": {"id": effect_id}},
-        )
-
-    async def preview_effect(self, device_id: str, effect_payload: dict) -> None:
-        """Preview an effect on the device without saving it."""
-        await self._request(
-            "POST",
-            "/v1/oauth/resources/device/effect/preview",
-            {"deviceId": device_id, "payload": effect_payload},
         )
 
     async def save_effect(self, device_id: str, effect_payload: dict) -> dict:
