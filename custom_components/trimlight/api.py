@@ -146,6 +146,14 @@ class TrimlightApi:
             {"deviceId": device_id, "payload": {"id": effect_id}},
         )
 
+    async def preview_effect(self, device_id: str, effect_payload: dict) -> None:
+        """Preview an effect on the device without saving it."""
+        await self._request(
+            "POST",
+            "/v1/oauth/resources/device/effect/preview",
+            {"deviceId": device_id, "payload": effect_payload},
+        )
+
     async def save_effect(self, device_id: str, effect_payload: dict) -> dict:
         """Save (create or update) an effect on the device.
 

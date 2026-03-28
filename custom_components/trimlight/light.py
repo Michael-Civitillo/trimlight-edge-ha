@@ -165,15 +165,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
 
         elif hs_color is not None:
-            # Solid color: save/update an "HA Color" effect on the device,
-            # then activate it via view_effect. preview_effect is broken on
-            # this firmware. view_effect also turns the device on.
-            #
+            # Solid color via preview_effect (category 1 = custom, mode 0 = STATIC).
             # API docs: pixel index range [0, 29], count range [0, 60].
-            # Category 1 = custom effect, mode 0 = STATIC.
-            # STATIC mode does NOT repeat — it plays the pattern once. So we
-            # fill ALL 30 entries × 60 count = 1800 pixels of solid color,
-            # enough to cover any residential strip.
+            # Fill all 30 entries for full strip coverage.
             color_int = _hs_to_api_color(hs_color)
 
             pixels = [
@@ -181,37 +175,49 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 for i in range(30)
             ]
 
-            # Reuse the cached "HA Color" slot, falling back to the effects
-            # list (after a coordinator poll), then creating a new slot.
-            # The in-memory cache means rapid color changes never create
-            # duplicate effects regardless of coordinator timing.
-            if self._color_effect_id is None:
-                existing = self._effect_by_name("HA Color")
-                if existing:
-                    self._color_effect_id = existing["id"]
-
-            effect_id = self._color_effect_id if self._color_effect_id is not None else -1
+            preview_payload = {
+                "category": 1,
+                "mode": 0,
+                "speed": 0,
+                "brightness": 255,
+                "pixels": pixels,
+            }
 
             try:
-                result = await api.save_effect(
-                    self._device_id,
-                    {
-                        "id": effect_id,
-                        "name": "HA Color",
-                        "category": 1,
-                        "mode": 0,
-                        "speed": 127,
-                        "brightness": 255,
-                        "pixels": pixels,
-                    },
-                )
-                saved_id = (result or {}).get("id", effect_id)
-                if saved_id and saved_id != -1:
-                    self._color_effect_id = saved_id  # cache for future calls
-                    await api.view_effect(self._device_id, saved_id)
-                    self._active_effect_name = "HA Color"
+                await api.preview_effect(self._device_id, preview_payload)
+                _LOGGER.debug("preview_effect succeeded on %s", self._device_id)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.error("Failed to set color on %s: %s", self._device_id, err)
+                _LOGGER.warning(
+                    "preview_effect failed on %s: %s — falling back to save+view",
+                    self._device_id, err,
+                )
+                # Fallback: save as "HA Color" effect, then view it.
+                if self._color_effect_id is None:
+                    existing = self._effect_by_name("HA Color")
+                    if existing:
+                        self._color_effect_id = existing["id"]
+
+                effect_id = self._color_effect_id if self._color_effect_id is not None else -1
+                try:
+                    result = await api.save_effect(
+                        self._device_id,
+                        {
+                            "id": effect_id,
+                            "name": "HA Color",
+                            "category": 1,
+                            "mode": 0,
+                            "speed": 0,
+                            "brightness": 255,
+                            "pixels": pixels,
+                        },
+                    )
+                    saved_id = (result or {}).get("id", effect_id)
+                    if saved_id and saved_id != -1:
+                        self._color_effect_id = saved_id
+                        await api.view_effect(self._device_id, saved_id)
+                        self._active_effect_name = "HA Color"
+                except Exception as err2:  # noqa: BLE001
+                    _LOGGER.error("Failed to set color on %s: %s", self._device_id, err2)
 
         else:
             # Plain turn-on: activate first saved effect (which also turns on
