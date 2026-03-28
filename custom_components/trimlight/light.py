@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS,
     ATTR_EFFECT,
     ColorMode,
     LightEntity,
@@ -21,6 +21,9 @@ from .const import DOMAIN, SWITCH_STATE_MANUAL, SWITCH_STATE_OFF
 from .coordinator import TrimlightCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds to hold optimistic state after a command before trusting API state.
+_COMMAND_COOLDOWN = 60
 
 
 async def async_setup_entry(
@@ -45,8 +48,8 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
       • effect selection from the effects saved on the device
     """
 
-    _attr_color_mode = ColorMode.BRIGHTNESS
-    _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+    _attr_color_mode = ColorMode.ONOFF
+    _attr_supported_color_modes = {ColorMode.ONOFF}
     _attr_supported_features = LightEntityFeature.EFFECT
     _attr_has_entity_name = True
     _attr_name = None  # device name is used as entity name via has_entity_name
@@ -58,9 +61,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self._device_id = device_id
         self._attr_unique_id = device_id
         # Track the name of the currently active effect locally.
-        # The API's currentEffect object doesn't include name/id, so we
-        # remember the last effect the user selected via HA.
         self._active_effect_name: str | None = None
+        # Timestamp of the last command sent — used to hold optimistic state.
+        self._last_command_time: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -97,17 +100,29 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         return self._data.get("connectivity", 0) == 1
 
     def _handle_coordinator_update(self) -> None:
-        """Update state from coordinator data, preserving optimistic writes."""
-        self._attr_is_on = self._data.get("switchState", SWITCH_STATE_OFF) != SWITCH_STATE_OFF
-        self.async_write_ha_state()
+        """Update state from coordinator data.
 
-    @property
-    def brightness(self) -> int | None:
-        """Return brightness from the currently running effect (0-255)."""
-        current = self._data.get("currentEffect")
-        if current:
-            return current.get("brightness")
-        return None
+        Holds the optimistic state for _COMMAND_COOLDOWN seconds after any
+        command so the API shadow has time to reflect the change before we
+        trust it again.
+        """
+        seconds_since_command = time.monotonic() - self._last_command_time
+        if seconds_since_command > _COMMAND_COOLDOWN:
+            # Enough time has passed — trust the API state.
+            switch_state = self._data.get("switchState")
+            if switch_state is not None:
+                self._attr_is_on = switch_state != SWITCH_STATE_OFF
+                _LOGGER.debug(
+                    "Device %s switchState=%s is_on=%s",
+                    self._device_id, switch_state, self._attr_is_on,
+                )
+        else:
+            _LOGGER.debug(
+                "Device %s holding optimistic state for %ds more",
+                self._device_id,
+                int(_COMMAND_COOLDOWN - seconds_since_command),
+            )
+        self.async_write_ha_state()
 
     @property
     def effect_list(self) -> list[str]:
@@ -123,51 +138,54 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     # ------------------------------------------------------------------ #
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the light, optionally setting an effect and/or brightness."""
+        """Turn on the light, optionally selecting a saved effect.
+
+        Note: preview_effect is not used because the device rejects category 0
+        (built-in) and only supports category 2 (holiday presets) via view_effect.
+        """
         api = self.coordinator.api
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
-        brightness: int | None = kwargs.get(ATTR_BRIGHTNESS)
 
-        if effect_name is not None:
-            effect = self._effect_by_name(effect_name)
-            if effect is None:
-                _LOGGER.error("Effect '%s' not found on device %s", effect_name, self._device_id)
-            else:
-                await api.view_effect(self._device_id, effect["id"])
-                self._active_effect_name = effect_name
-
-        if brightness is not None:
-            current = self._data.get("currentEffect", {})
-            if current:
-                preview: dict[str, Any] = {
-                    "category": current.get("category", 0),
-                    "mode": current.get("mode", 0),
-                    "speed": current.get("speed", 100),
-                    "brightness": brightness,
-                }
-                if current.get("category") == 0:
-                    preview["pixelLen"] = current.get("pixelLen", 30)
-                    preview["reverse"] = current.get("reverse", False)
-                if current.get("category") == 0:
-                    await api.preview_effect(self._device_id, preview)
-            else:
-                _LOGGER.debug(
-                    "No currentEffect data for %s; skipping brightness preview",
-                    self._device_id,
-                )
-
-        await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
-
-        # Optimistically reflect the new state immediately.
-        # Do not trigger a coordinator refresh — the device shadow takes time
-        # to update, so polling immediately would flip the state back to off.
+        # Optimistic update first — holds state for 60s regardless of API outcome.
+        self._last_command_time = time.monotonic()
         self._attr_is_on = True
         self.async_write_ha_state()
 
+        if effect_name is not None:
+            # Activate a specific named saved effect.
+            effect = self._effect_by_name(effect_name)
+            if effect is None:
+                _LOGGER.error(
+                    "Effect '%s' not found on device %s", effect_name, self._device_id
+                )
+            else:
+                try:
+                    await api.view_effect(self._device_id, effect["id"])
+                    self._active_effect_name = effect_name
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Failed to activate effect on %s: %s", self._device_id, err)
+        else:
+            # Plain turn-on: activate the first saved effect so the device
+            # knows what to display in manual mode.
+            effects = self._effects
+            if effects:
+                try:
+                    await api.view_effect(self._device_id, effects[0]["id"])
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.error("Failed to view effect on %s: %s", self._device_id, err)
+
+        try:
+            await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to turn on %s: %s", self._device_id, err)
+
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
-        await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
-
-        # Optimistically reflect the new state immediately.
+        self._last_command_time = time.monotonic()
         self._attr_is_on = False
         self.async_write_ha_state()
+
+        try:
+            await self.coordinator.api.set_switch_state(self._device_id, SWITCH_STATE_OFF)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("Failed to turn off %s: %s", self._device_id, err)
