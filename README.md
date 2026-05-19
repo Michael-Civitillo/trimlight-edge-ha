@@ -1,6 +1,6 @@
 # ✨ Trimlight Edge — Home Assistant Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-blue.svg)](https://github.com/hacs/integration)
 [![GitHub release](https://img.shields.io/github/v/release/Michael-Civitillo/trimlight-edge-ha)](https://github.com/Michael-Civitillo/trimlight-edge-ha/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![hassfest](https://github.com/Michael-Civitillo/trimlight-edge-ha/actions/workflows/validate.yml/badge.svg)](https://github.com/Michael-Civitillo/trimlight-edge-ha/actions/workflows/validate.yml)
@@ -36,11 +36,11 @@ Once you have them, setup takes about 30 seconds. ⏱️
 
 ### Via HACS (recommended)
 
-1. Open HACS → **Integrations**
-2. Three-dot menu → **Custom repositories**
-3. Add `https://github.com/Michael-Civitillo/trimlight-edge-ha`, category **Integration**
-4. Search **Trimlight Edge** → **Download**
-5. Restart Home Assistant
+This integration is available in the HACS default repository — no custom repo setup required. 🎉
+
+1. Open HACS
+2. Search **Trimlight Edge** → **Download**
+3. Restart Home Assistant
 
 ### Manual
 
