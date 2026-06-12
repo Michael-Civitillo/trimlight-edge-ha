@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -143,6 +144,44 @@ class TestRequest:
         with pytest.raises(TrimlightApiError):
             await api._request("GET", "/some/path")
         assert api._last_request_time > 0.0
+
+
+class TestCurrentDate:
+    """Tests for the currentDate payload helper."""
+
+    def test_field_mapping(self):
+        # 2026-06-14 is a Sunday — API expects SUNDAY=1.
+        fake_now = datetime(2026, 6, 14, 10, 30, 5)
+        with patch(
+            "custom_components.trimlight.api.dt_util.now", return_value=fake_now
+        ):
+            result = TrimlightApi._current_date()
+
+        assert result == {
+            "year": 26,
+            "month": 6,
+            "day": 14,
+            "weekday": 1,
+            "hours": 10,
+            "minutes": 30,
+            "seconds": 5,
+        }
+
+    def test_weekday_saturday(self):
+        # 2026-06-13 is a Saturday — API expects SATURDAY=7.
+        fake_now = datetime(2026, 6, 13)
+        with patch(
+            "custom_components.trimlight.api.dt_util.now", return_value=fake_now
+        ):
+            assert TrimlightApi._current_date()["weekday"] == 7
+
+    def test_weekday_monday(self):
+        # 2026-06-15 is a Monday — API expects MONDAY=2.
+        fake_now = datetime(2026, 6, 15)
+        with patch(
+            "custom_components.trimlight.api.dt_util.now", return_value=fake_now
+        ):
+            assert TrimlightApi._current_date()["weekday"] == 2
 
 
 class TestGetDevices:

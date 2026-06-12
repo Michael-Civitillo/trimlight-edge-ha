@@ -13,10 +13,11 @@ import hashlib
 import hmac
 import logging
 import time
-from datetime import datetime
 from typing import Any
 
 import aiohttp
+
+from homeassistant.util import dt as dt_util
 
 from .const import API_BASE_URL, API_REQUEST_MIN_INTERVAL
 
@@ -118,8 +119,13 @@ class TrimlightApi:
 
     @staticmethod
     def _current_date() -> dict:
-        """Return the current date/time dict the API expects."""
-        now = datetime.now()
+        """Return the current date/time dict the API expects.
+
+        Uses Home Assistant's configured timezone rather than the host's:
+        the two often differ (e.g. UTC containers), and this value drives
+        the device clock and timer schedules.
+        """
+        now = dt_util.now()
         # API weekday: SUNDAY=1 … SATURDAY=7; Python isoweekday: MON=1 … SUN=7
         weekday = now.isoweekday() % 7 + 1
         return {
