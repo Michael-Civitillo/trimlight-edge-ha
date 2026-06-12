@@ -8,6 +8,7 @@ from homeassistant.const import STATE_OFF, STATE_ON
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.trimlight.api import TrimlightApiError
 from custom_components.trimlight.const import DOMAIN, HA_COLOR_EFFECT_NAME
 
 from .conftest import MOCK_COORDINATOR_DATA, MOCK_DEVICE_ID, MOCK_DEVICE_NAME
@@ -77,6 +78,25 @@ async def test_effect_list_populated(hass, mock_api):
     effect_list = state.attributes.get("effect_list", [])
     assert "NEW YEAR" in effect_list
     assert "INDEPENDENCE DAY" in effect_list
+
+
+async def test_effect_list_skips_unnamed_effects(hass, mock_api):
+    """Malformed effects without a name must not break the entity state."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    data = {
+        MOCK_DEVICE_ID: {
+            **device,
+            "effects": [*device["effects"], {"id": 3}],
+        }
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=data,
+        entry_id="test_entry_unnamed",
+        unique_id="test_client_id_unnamed",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes["effect_list"] == ["NEW YEAR", "INDEPENDENCE DAY"]
 
 
 async def test_turn_on_activates_first_effect(hass, mock_api):
@@ -169,3 +189,40 @@ async def test_rapid_color_changes_skip_view(hass, mock_api):
     )
     assert mock_api.save_effect.call_count == 1
     assert mock_api.view_effect.call_count == 0
+
+
+async def test_color_recovers_after_stale_effect_id(hass, mock_api):
+    """A failed save (e.g. slot deleted in the app) must not break color forever."""
+    await _setup_integration(hass, mock_api)
+
+    # First color set — caches slot id 99.
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (0.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == -1
+
+    # Slot deleted on the device — save with the cached id now fails.
+    mock_api.save_effect.side_effect = TrimlightApiError("effect not found")
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (120.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == 99
+
+    # Next attempt should create a new slot and activate it.
+    mock_api.save_effect.side_effect = None
+    mock_api.save_effect.return_value = {"id": 123}
+    mock_api.view_effect.reset_mock()
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (240.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == -1
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 123)

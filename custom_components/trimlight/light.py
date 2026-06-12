@@ -45,7 +45,7 @@ def _hs_to_api_color(hs: tuple[float, float]) -> int:
     """Convert HA hs_color (hue 0-360, sat 0-100) to API decimal RGB integer."""
     h, s = hs
     r, g, b = colorsys.hsv_to_rgb(h / 360.0, s / 100.0, 1.0)
-    return (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
+    return (round(r * 255) << 16) | (round(g * 255) << 8) | round(b * 255)
 
 
 def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
@@ -162,7 +162,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     @property
     def effect_list(self) -> list[str]:
         """Return the list of available effect names."""
-        return [e["name"] for e in self._effects]
+        return [e["name"] for e in self._effects if e.get("name")]
 
     @property
     def effect(self) -> str | None:
@@ -182,7 +182,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
           - ATTR_HS_COLOR:  saves a solid static color effect then activates it
           - ATTR_BRIGHTNESS: updates the brightness of the current color effect
         """
-        api = self.coordinator.api
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
         hs_color: tuple[float, float] | None = kwargs.get(ATTR_HS_COLOR)
         brightness: int | None = kwargs.get(ATTR_BRIGHTNESS)
@@ -277,12 +276,20 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
             # Only call view_effect the first time to activate the slot.
             # After that, save_effect alone updates the running pattern,
-            # halving the API calls for rapid color changes.
-            if self._active_effect_name != HA_COLOR_EFFECT_NAME:
+            # halving the API calls for rapid color changes. A freshly
+            # created slot (effect_id == -1) must always be activated.
+            if (
+                effect_id == -1
+                or self._active_effect_name != HA_COLOR_EFFECT_NAME
+            ):
                 await api.view_effect(self._device_id, saved_id)
             self._active_effect_name = HA_COLOR_EFFECT_NAME
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to set color on %s", self._device_id)
+            # The cached slot may be stale (e.g. the effect was deleted in
+            # the Trimlight app). Drop it so the next attempt re-resolves
+            # by name or creates a new slot instead of failing forever.
+            self._color_effect_id = None
 
     async def _plain_turn_on(self) -> None:
         """Turn on with no specific color or effect requested."""
@@ -295,6 +302,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 return
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Failed to re-activate HA Color on %s", self._device_id)
+                self._color_effect_id = None
 
         # Otherwise activate the first saved effect.
         effects = self._effects

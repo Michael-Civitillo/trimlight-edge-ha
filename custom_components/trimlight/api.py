@@ -13,10 +13,11 @@ import hashlib
 import hmac
 import logging
 import time
-from datetime import datetime
 from typing import Any
 
 import aiohttp
+
+from homeassistant.util import dt as dt_util
 
 from .const import API_BASE_URL, API_REQUEST_MIN_INTERVAL
 
@@ -69,6 +70,9 @@ class TrimlightApi:
 
         Requests are serialized via a lock and rate-limited to prevent
         the Trimlight server from returning error 20000.
+
+        Raises TrimlightApiError on network failures, timeouts, HTTP errors,
+        unparseable responses, and non-zero API result codes.
         """
         async with self._lock:
             elapsed = time.monotonic() - self._last_request_time
@@ -77,13 +81,24 @@ class TrimlightApi:
 
             url = f"{API_BASE_URL}{path}"
             headers = self._build_headers()
-            async with asyncio.timeout(10):
-                resp = await self._session.request(
-                    method, url, headers=headers, json=data
-                )
-                result = await resp.json()
-            self._last_request_time = time.monotonic()
+            try:
+                async with asyncio.timeout(10):
+                    resp = await self._session.request(
+                        method, url, headers=headers, json=data
+                    )
+                    resp.raise_for_status()
+                    result = await resp.json()
+            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                raise TrimlightApiError(
+                    f"Request to {path} failed: {err}"
+                ) from err
+            finally:
+                # Stamp even on failure: the server may have processed the
+                # request, so the next one must still be spaced out.
+                self._last_request_time = time.monotonic()
 
+        if not isinstance(result, dict):
+            raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")
         code = result.get("code")
         if code != 0:
             raise TrimlightApiError(
@@ -100,12 +115,17 @@ class TrimlightApi:
         payload = await self._request(
             "GET", "/v1/oauth/resources/devices", {"page": 0}
         )
-        return payload["data"]
+        return (payload or {}).get("data") or []
 
     @staticmethod
     def _current_date() -> dict:
-        """Return the current date/time dict the API expects."""
-        now = datetime.now()
+        """Return the current date/time dict the API expects.
+
+        Uses Home Assistant's configured timezone rather than the host's:
+        the two often differ (e.g. UTC containers), and this value drives
+        the device clock and timer schedules.
+        """
+        now = dt_util.now()
         # API weekday: SUNDAY=1 … SATURDAY=7; Python isoweekday: MON=1 … SUN=7
         weekday = now.isoweekday() % 7 + 1
         return {
