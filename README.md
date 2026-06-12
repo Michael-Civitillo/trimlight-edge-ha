@@ -28,6 +28,8 @@ This integration requires a **Client ID** and **Client Secret** from Trimlight. 
 
 > Trimlight's own documentation says: *"Please contact our business to obtain clientId and clientSecret."*
 
+💬 In my case, I was able to obtain my Client Secret from **Ryan Whittaker** at **Ryan@trimlight.net** — reaching out there may be a good starting point.
+
 Once you have them, setup takes about 30 seconds. ⏱️
 
 ---
