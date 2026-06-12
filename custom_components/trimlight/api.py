@@ -69,6 +69,9 @@ class TrimlightApi:
 
         Requests are serialized via a lock and rate-limited to prevent
         the Trimlight server from returning error 20000.
+
+        Raises TrimlightApiError on network failures, timeouts, HTTP errors,
+        unparseable responses, and non-zero API result codes.
         """
         async with self._lock:
             elapsed = time.monotonic() - self._last_request_time
@@ -77,13 +80,24 @@ class TrimlightApi:
 
             url = f"{API_BASE_URL}{path}"
             headers = self._build_headers()
-            async with asyncio.timeout(10):
-                resp = await self._session.request(
-                    method, url, headers=headers, json=data
-                )
-                result = await resp.json()
-            self._last_request_time = time.monotonic()
+            try:
+                async with asyncio.timeout(10):
+                    resp = await self._session.request(
+                        method, url, headers=headers, json=data
+                    )
+                    resp.raise_for_status()
+                    result = await resp.json()
+            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                raise TrimlightApiError(
+                    f"Request to {path} failed: {err}"
+                ) from err
+            finally:
+                # Stamp even on failure: the server may have processed the
+                # request, so the next one must still be spaced out.
+                self._last_request_time = time.monotonic()
 
+        if not isinstance(result, dict):
+            raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")
         code = result.get("code")
         if code != 0:
             raise TrimlightApiError(
