@@ -196,6 +196,14 @@ class TestGetDevices:
         result = await api.get_devices()
         assert result == devices
 
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_payload_missing(self, api):
+        mock_resp = _mock_response({"code": 0, "desc": "success"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        result = await api.get_devices()
+        assert result == []
+
 
 class TestNotifyUpdateShadow:
     """Tests for the notify_update_shadow method."""

@@ -115,7 +115,7 @@ class TrimlightApi:
         payload = await self._request(
             "GET", "/v1/oauth/resources/devices", {"page": 0}
         )
-        return payload["data"]
+        return (payload or {}).get("data") or []
 
     @staticmethod
     def _current_date() -> dict:

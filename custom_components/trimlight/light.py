@@ -45,7 +45,7 @@ def _hs_to_api_color(hs: tuple[float, float]) -> int:
     """Convert HA hs_color (hue 0-360, sat 0-100) to API decimal RGB integer."""
     h, s = hs
     r, g, b = colorsys.hsv_to_rgb(h / 360.0, s / 100.0, 1.0)
-    return (int(r * 255) << 16) | (int(g * 255) << 8) | int(b * 255)
+    return (round(r * 255) << 16) | (round(g * 255) << 8) | round(b * 255)
 
 
 def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
@@ -162,7 +162,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     @property
     def effect_list(self) -> list[str]:
         """Return the list of available effect names."""
-        return [e["name"] for e in self._effects]
+        return [e["name"] for e in self._effects if e.get("name")]
 
     @property
     def effect(self) -> str | None:
@@ -182,7 +182,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
           - ATTR_HS_COLOR:  saves a solid static color effect then activates it
           - ATTR_BRIGHTNESS: updates the brightness of the current color effect
         """
-        api = self.coordinator.api
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
         hs_color: tuple[float, float] | None = kwargs.get(ATTR_HS_COLOR)
         brightness: int | None = kwargs.get(ATTR_BRIGHTNESS)

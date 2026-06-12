@@ -80,6 +80,25 @@ async def test_effect_list_populated(hass, mock_api):
     assert "INDEPENDENCE DAY" in effect_list
 
 
+async def test_effect_list_skips_unnamed_effects(hass, mock_api):
+    """Malformed effects without a name must not break the entity state."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    data = {
+        MOCK_DEVICE_ID: {
+            **device,
+            "effects": [*device["effects"], {"id": 3}],
+        }
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=data,
+        entry_id="test_entry_unnamed",
+        unique_id="test_client_id_unnamed",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes["effect_list"] == ["NEW YEAR", "INDEPENDENCE DAY"]
+
+
 async def test_turn_on_activates_first_effect(hass, mock_api):
     """Plain turn_on should activate the first saved effect via view_effect."""
     await _setup_integration(hass, mock_api)
