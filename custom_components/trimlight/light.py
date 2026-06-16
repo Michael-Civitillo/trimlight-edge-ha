@@ -177,7 +177,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         """Turn on the light.
 
         Supports:
-          - Plain toggle:   activates first saved effect (or HA Color if set)
+          - Plain toggle:   powers on; the device resumes its previous effect
           - ATTR_EFFECT:    activates the named saved effect
           - ATTR_HS_COLOR:  saves a solid static color effect then activates it
           - ATTR_BRIGHTNESS: updates the brightness of the current color effect
@@ -188,6 +188,13 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
         _LOGGER.debug("turn_on on %s — kwargs: %s", self._device_id, kwargs)
 
+        # view_effect/save_effect activate an effect but never touch the
+        # device's persisted switchState, so a fresh power-on must set it to
+        # MANUAL explicitly. Without it the shadow keeps reporting OFF and the
+        # entity flips back to off once the optimistic cooldown expires.
+        # Captured before the optimistic flag below overwrites it.
+        needs_power_on = not self._attr_is_on
+
         # Optimistic update — holds for _COMMAND_COOLDOWN seconds.
         self._last_command_time = time.monotonic()
         self._attr_is_on = True
@@ -197,15 +204,33 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             self._attr_brightness = brightness
         self.async_write_ha_state()
 
+        # Power on first when needed: setting switchState=MANUAL makes the
+        # device resume its persisted effect, which would otherwise override an
+        # effect/color activated beforehand.
         if effect_name is not None:
+            if needs_power_on:
+                await self._power_on()
             await self._activate_effect(effect_name)
         elif hs_color is not None or brightness is not None:
+            if needs_power_on:
+                await self._power_on()
+                # The power-on resumed the device's persisted effect, so the
+                # HA Color slot is no longer running — force its re-activation.
+                self._active_effect_name = None
             await self._set_color(
                 hs_color if hs_color is not None else self._attr_hs_color,
                 brightness if brightness is not None else self._attr_brightness,
             )
-        else:
-            await self._plain_turn_on()
+        elif needs_power_on:
+            # Plain turn-on: powering on makes the device resume the effect it
+            # was last showing. Re-issuing MANUAL while already on would revert
+            # an effect activated via view_effect, so only do it when off.
+            await self._power_on()
+
+        # Republish state: the command helpers update _active_effect_name after
+        # the optimistic write above, so without this the effect shown in HA
+        # lags one selection behind until the next coordinator poll.
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
@@ -291,30 +316,18 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             # by name or creates a new slot instead of failing forever.
             self._color_effect_id = None
 
-    async def _plain_turn_on(self) -> None:
-        """Turn on with no specific color or effect requested."""
-        api = self.coordinator.api
+    async def _power_on(self) -> None:
+        """Power the device on (manual mode).
 
-        # Re-activate the current HA Color if one was previously set.
-        if self._color_effect_id is not None:
-            try:
-                await api.view_effect(self._device_id, self._color_effect_id)
-                return
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Failed to re-activate HA Color on %s", self._device_id)
-                self._color_effect_id = None
-
-        # Otherwise activate the first saved effect.
-        effects = self._effects
-        if effects:
-            try:
-                await api.view_effect(self._device_id, effects[0]["id"])
-                return
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Failed to view effect on %s", self._device_id)
-
-        # Last resort: just set switch state to manual.
+        Activating an effect via view_effect/save_effect does not update the
+        device's persisted switchState, so it must be set explicitly here or
+        the device keeps reporting itself as off. Setting MANUAL also makes the
+        device resume the effect it was last showing, which is the desired
+        behaviour for a plain on/off toggle.
+        """
         try:
-            await api.set_switch_state(self._device_id, SWITCH_STATE_MANUAL)
+            await self.coordinator.api.set_switch_state(
+                self._device_id, SWITCH_STATE_MANUAL
+            )
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to turn on %s", self._device_id)
+            _LOGGER.exception("Failed to power on %s", self._device_id)

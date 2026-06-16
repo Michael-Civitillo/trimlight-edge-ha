@@ -99,13 +99,40 @@ async def test_effect_list_skips_unnamed_effects(hass, mock_api):
     assert state.attributes["effect_list"] == ["NEW YEAR", "INDEPENDENCE DAY"]
 
 
-async def test_turn_on_activates_first_effect(hass, mock_api):
-    """Plain turn_on should activate the first saved effect via view_effect."""
+async def test_plain_turn_on_while_on_is_noop(hass, mock_api):
+    """Plain turn_on on an already-on device must not change the effect.
+
+    Re-issuing MANUAL would revert an effect activated via view_effect, so a
+    no-op is the correct behaviour here.
+    """
     await _setup_integration(hass, mock_api)
     await hass.services.async_call(
         "light", "turn_on", {"entity_id": _entity_id()}, blocking=True
     )
-    mock_api.view_effect.assert_called_with(MOCK_DEVICE_ID, 1)
+    mock_api.view_effect.assert_not_called()
+    mock_api.set_switch_state.assert_not_called()
+
+
+async def test_plain_turn_on_while_off_powers_on(hass, mock_api):
+    """Plain turn_on on an off device should power it on via switchState=MANUAL.
+
+    It must NOT force the first saved effect (the device resumes the effect it
+    was last showing), which is what previously caused a wrong/static effect.
+    """
+    off_data = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "switchState": 0}
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=off_data,
+        entry_id="test_entry_plain_off",
+        unique_id="test_client_id_plain_off",
+    )
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": _entity_id()}, blocking=True
+    )
+    mock_api.set_switch_state.assert_called_once_with(MOCK_DEVICE_ID, 1)
+    mock_api.view_effect.assert_not_called()
 
 
 async def test_turn_on_with_effect(hass, mock_api):
@@ -118,6 +145,51 @@ async def test_turn_on_with_effect(hass, mock_api):
         blocking=True,
     )
     mock_api.view_effect.assert_called_with(MOCK_DEVICE_ID, 2)
+
+
+async def test_turn_on_with_effect_publishes_effect_immediately(hass, mock_api):
+    """The active effect must be reflected in HA state as soon as the call returns.
+
+    Regression test: the effect name used to lag one selection behind because
+    state was only written before the effect was activated.
+    """
+    await _setup_integration(hass, mock_api)
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "INDEPENDENCE DAY"},
+        blocking=True,
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get("effect") == "INDEPENDENCE DAY"
+
+
+async def test_turn_on_effect_while_off_powers_on_then_activates(hass, mock_api):
+    """Activating an effect on an off device must power on, then view the effect."""
+    off_data = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "switchState": 0}
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=off_data,
+        entry_id="test_entry_effect_off",
+        unique_id="test_client_id_effect_off",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "INDEPENDENCE DAY"},
+        blocking=True,
+    )
+    # Power on must happen before the effect is activated, otherwise MANUAL
+    # would override it with the device's persisted effect.
+    mock_api.set_switch_state.assert_called_once_with(MOCK_DEVICE_ID, 1)
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 2)
+    ordered = [
+        c[0] for c in mock_api.mock_calls
+        if c[0] in ("set_switch_state", "view_effect")
+    ]
+    assert ordered == ["set_switch_state", "view_effect"]
 
 
 async def test_turn_on_with_color(hass, mock_api):
