@@ -236,8 +236,14 @@ async def test_turn_off(hass, mock_api):
     mock_api.set_switch_state.assert_called_once_with(MOCK_DEVICE_ID, 0)
 
 
-async def test_rapid_color_changes_skip_view(hass, mock_api):
-    """After the first color set, subsequent changes should skip view_effect."""
+async def test_color_change_always_repaints(hass, mock_api):
+    """Every solid-color change must re-activate the slot so the device repaints.
+
+    Regression test: changing from one solid color to another (same slot) used
+    to call save_effect only, which updates the stored values but does not make
+    the controller repaint — the new color was silently ignored on the device
+    while HA state showed it. Each change must call view_effect too.
+    """
     await _setup_integration(hass, mock_api)
 
     # First color — should call both save_effect and view_effect.
@@ -250,7 +256,7 @@ async def test_rapid_color_changes_skip_view(hass, mock_api):
     assert mock_api.view_effect.call_count == 1
     assert mock_api.save_effect.call_count == 1
 
-    # Second color — should call save_effect but NOT view_effect again.
+    # Second color — same slot, but must still re-activate to repaint.
     mock_api.view_effect.reset_mock()
     mock_api.save_effect.reset_mock()
     await hass.services.async_call(
@@ -260,7 +266,7 @@ async def test_rapid_color_changes_skip_view(hass, mock_api):
         blocking=True,
     )
     assert mock_api.save_effect.call_count == 1
-    assert mock_api.view_effect.call_count == 0
+    assert mock_api.view_effect.call_count == 1
 
 
 async def test_color_recovers_after_stale_effect_id(hass, mock_api):

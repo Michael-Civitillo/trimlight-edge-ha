@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Effect dropdown no longer lags one selection behind — the active effect is now published to Home Assistant as soon as the command completes instead of on the next poll
 - Lights no longer flip to "off" in HA a minute or two after being turned on — turning on now sets the device's switch state to manual so the cloud shadow reports the device as on (previously `view_effect`/`save_effect` left the persisted switch state untouched)
 - Plain on/off toggle now lets the device resume the effect it was last showing instead of forcing the first saved effect or a stale "HA Color" slot, which could leave the strip static white
+- Color-to-color changes now repaint the physical lights — re-saving the "HA Color" slot updates the stored values but only `view_effect` makes the controller repaint, so a second solid color (e.g. red → blue) was silently ignored on the device while HA showed the new color
 
 ## [1.1.2] - 2026-06-12
 

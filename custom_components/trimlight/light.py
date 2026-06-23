@@ -214,9 +214,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         elif hs_color is not None or brightness is not None:
             if needs_power_on:
                 await self._power_on()
-                # The power-on resumed the device's persisted effect, so the
-                # HA Color slot is no longer running — force its re-activation.
-                self._active_effect_name = None
             await self._set_color(
                 hs_color if hs_color is not None else self._attr_hs_color,
                 brightness if brightness is not None else self._attr_brightness,
@@ -299,15 +296,12 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
             self._color_effect_id = saved_id
 
-            # Only call view_effect the first time to activate the slot.
-            # After that, save_effect alone updates the running pattern,
-            # halving the API calls for rapid color changes. A freshly
-            # created slot (effect_id == -1) must always be activated.
-            if (
-                effect_id == -1
-                or self._active_effect_name != HA_COLOR_EFFECT_NAME
-            ):
-                await api.view_effect(self._device_id, saved_id)
+            # Always re-activate the slot after saving. Re-saving the
+            # "HA Color" effect updates the stored values but does not make the
+            # controller repaint the running pattern — only view_effect does.
+            # Skipping it meant same-slot changes (e.g. red -> blue) were
+            # silently ignored on the device while HA state showed the new color.
+            await api.view_effect(self._device_id, saved_id)
             self._active_effect_name = HA_COLOR_EFFECT_NAME
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Failed to set color on %s", self._device_id)
