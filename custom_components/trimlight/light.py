@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from homeassistant.config_entries import ConfigEntry
 
@@ -27,8 +28,11 @@ from .const import (
     EFFECT_CATEGORY_CUSTOM,
     EFFECT_MODE_STATIC,
     HA_COLOR_EFFECT_NAME,
+    SCHEDULE_REPETITION_WEEKDAYS,
+    SCHEDULE_REPETITION_WEEKEND,
     SWITCH_STATE_MANUAL,
     SWITCH_STATE_OFF,
+    SWITCH_STATE_TIMER,
 )
 from .coordinator import TrimlightCoordinator
 
@@ -46,6 +50,143 @@ def _hs_to_api_color(hs: tuple[float, float]) -> int:
     h, s = hs
     r, g, b = colorsys.hsv_to_rgb(h / 360.0, s / 100.0, 1.0)
     return (round(r * 255) << 16) | (round(g * 255) << 8) | round(b * 255)
+
+
+def _time_to_minutes(obj: Any) -> int | None:
+    """Convert a schedule time object to minutes-since-midnight.
+
+    Trimlight time objects use the same shape as the API ``currentDate``
+    helper (``hours``/``minutes``). Older/alternate payloads may use
+    ``hour``/``minute``; both are accepted. Returns None if the value can't
+    be parsed so the caller can fall back to mode-based state.
+    """
+    if not isinstance(obj, dict):
+        return None
+    hours = obj.get("hours", obj.get("hour"))
+    minutes = obj.get("minutes", obj.get("minute"))
+    if hours is None or minutes is None:
+        return None
+    try:
+        return (int(hours) % 24) * 60 + (int(minutes) % 60)
+    except (TypeError, ValueError):
+        return None
+
+
+def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
+    """Return True if now falls inside the [start, end) on-window.
+
+    Handles windows that wrap past midnight (e.g. 18:00 -> 02:00).
+    """
+    if start == end:
+        return False
+    if start < end:
+        return start <= now_minutes < end
+    # Wraps midnight: on from start until end the next day.
+    return now_minutes >= start or now_minutes < end
+
+
+def _window_minutes(entry: dict[str, Any]) -> tuple[int, int] | None:
+    """Return an entry's (start, end) on-window in minutes, or None."""
+    start = _time_to_minutes(entry.get("startTime"))
+    end = _time_to_minutes(entry.get("endTime"))
+    if start is None or end is None:
+        return None
+    return start, end
+
+
+def _daily_applies_today(entry: dict[str, Any], now: Any) -> bool:
+    """Return True if a daily schedule's repetition includes today.
+
+    Only the day sets we can identify positively (week days / weekend) are
+    excluded; "everyday", "today only", and any unrecognised repetition value
+    are treated as applying so we never report an on light as off.
+    """
+    repetition = entry.get("repetition")
+    is_weekend = now.weekday() >= 5  # Mon=0 … Sun=6
+    if repetition == SCHEDULE_REPETITION_WEEKDAYS:
+        return not is_weekend
+    if repetition == SCHEDULE_REPETITION_WEEKEND:
+        return is_weekend
+    return True
+
+
+def _calendar_active_today(entry: dict[str, Any], now: Any) -> bool:
+    """Return True if today's date falls within a calendar entry's range."""
+    start = entry.get("startDate")
+    end = entry.get("endDate")
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return False
+    try:
+        start_md = (int(start["month"]), int(start["day"]))
+        end_md = (int(end["month"]), int(end["day"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    now_md = (now.month, now.day)
+    if start_md <= end_md:
+        return start_md <= now_md <= end_md
+    # Range wraps the year end (e.g. Dec 31 -> Jan 1).
+    return now_md >= start_md or now_md <= end_md
+
+
+def _active_windows(data: dict[str, Any], now: Any) -> list[tuple[int, int]]:
+    """Collect every on-window in effect today (daily + calendar)."""
+    windows: list[tuple[int, int]] = []
+
+    daily = data.get("daily")
+    if isinstance(daily, list):
+        for entry in daily:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("enable", True):
+                continue
+            if not _daily_applies_today(entry, now):
+                continue
+            window = _window_minutes(entry)
+            if window is not None:
+                windows.append(window)
+
+    calendar = data.get("calendar")
+    if isinstance(calendar, list):
+        for entry in calendar:
+            if not isinstance(entry, dict):
+                continue
+            if not _calendar_active_today(entry, now):
+                continue
+            window = _window_minutes(entry)
+            if window is not None:
+                windows.append(window)
+
+    return windows
+
+
+def _timer_schedule_is_on(data: dict[str, Any], now: Any) -> bool | None:
+    """Determine on/off from the device's timer schedule.
+
+    In timer mode the device's persisted ``switchState`` stays ``2`` whether
+    the schedule currently has the lights lit or not, so the running state has
+    to be derived from the schedule windows. Each daily schedule and each
+    calendar event is a single on-window; the lights are on while now is inside
+    any window in effect today.
+
+    Returns:
+        True/False when the schedule positively determines the state, or None
+        when there are no usable windows so the caller can fall back to
+        treating timer mode as on.
+
+    Calendar events and daily schedules are treated as additive (on if inside
+    any of them). If calendar events actually override daily on their dates,
+    this can only ever leave a window on that the device turned off — it never
+    reports an on light as off, which keeps the fallback safe.
+    """
+    windows = _active_windows(data, now)
+    if not windows:
+        return None
+
+    now_minutes = now.hour * 60 + now.minute
+    for start, end in windows:
+        if _now_in_window(now_minutes, start, end):
+            return True
+    return False
 
 
 def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
@@ -108,10 +249,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self._attr_brightness = 255
         # Set initial on/off state from coordinator data so the entity
         # doesn't start as "unknown" before the first coordinator update.
-        data = self.coordinator.data.get(device_id, {})
-        switch_state = data.get("switchState")
-        if switch_state is not None:
-            self._attr_is_on = switch_state != SWITCH_STATE_OFF
+        is_on = self._resolve_is_on(self.coordinator.data.get(device_id, {}))
+        if is_on is not None:
+            self._attr_is_on = is_on
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -130,6 +270,26 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     def _effect_by_name(self, name: str) -> dict[str, Any] | None:
         """Find a saved effect by name."""
         return next((e for e in self._effects if e.get("name") == name), None)
+
+    def _resolve_is_on(self, data: dict[str, Any]) -> bool | None:
+        """Resolve the on/off state from coordinator data.
+
+        Off and manual map directly from ``switchState``. In timer mode the
+        persisted ``switchState`` stays ``2`` even after the schedule has
+        turned the lights off, so the running state is derived from the
+        schedule windows (falling back to "on" when it can't be determined).
+        Returns None when there's no switch state to read.
+        """
+        switch_state = data.get("switchState")
+        if switch_state is None:
+            return None
+        if switch_state == SWITCH_STATE_OFF:
+            return False
+        if switch_state == SWITCH_STATE_TIMER:
+            scheduled = _timer_schedule_is_on(data, dt_util.now())
+            if scheduled is not None:
+                return scheduled
+        return True
 
     # ------------------------------------------------------------------ #
     # HA entity properties                                                 #
@@ -154,9 +314,9 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
     def _handle_coordinator_update(self) -> None:
         """Sync state from coordinator, respecting the optimistic cooldown."""
         if time.monotonic() - self._last_command_time > _COMMAND_COOLDOWN:
-            switch_state = self._data.get("switchState")
-            if switch_state is not None:
-                self._attr_is_on = switch_state != SWITCH_STATE_OFF
+            is_on = self._resolve_is_on(self._data)
+            if is_on is not None:
+                self._attr_is_on = is_on
         self.async_write_ha_state()
 
     @property

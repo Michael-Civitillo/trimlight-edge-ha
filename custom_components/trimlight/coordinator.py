@@ -52,6 +52,13 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 detail = await self.api.get_device(device_id)
                 merged = {**device, **detail}
                 _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
+                _LOGGER.debug(
+                    "Device %s switchState=%s daily=%s calendar=%s",
+                    device_id,
+                    merged.get("switchState"),
+                    merged.get("daily"),
+                    merged.get("calendar"),
+                )
                 result[device_id] = merged
             except TrimlightApiError as err:
                 _LOGGER.warning(

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-06-24
+
+### Fixed
+- Lights on a timer schedule now show as off in Home Assistant once the schedule turns them off — the device keeps reporting timer mode (`switchState=2`) whether the lights are currently lit or not, so the running state is now derived from the schedule's on/off windows instead of treating timer mode as always on ([#10])
+
+### Thanks
+- [@CptSugarFree](https://github.com/CptSugarFree) for reporting that timer-mode lights showed as on after the schedule turned them off ([#10])
+
+[#10]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/10
+
 ## [1.1.3] - 2026-06-23
 
 ### Fixed

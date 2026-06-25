@@ -14,6 +14,12 @@ SWITCH_STATE_OFF = 0
 SWITCH_STATE_MANUAL = 1
 SWITCH_STATE_TIMER = 2
 
+# Daily schedule repetition values (API docs appendix [6]).
+SCHEDULE_REPETITION_TODAY = 0
+SCHEDULE_REPETITION_EVERYDAY = 1
+SCHEDULE_REPETITION_WEEKDAYS = 2
+SCHEDULE_REPETITION_WEEKEND = 3
+
 # API minimum delay between requests (seconds).
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3
