@@ -86,10 +86,16 @@ def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
 
 
 def _window_minutes(entry: dict[str, Any]) -> tuple[int, int] | None:
-    """Return an entry's (start, end) on-window in minutes, or None."""
+    """Return an entry's (start, end) on-window in minutes, or None.
+
+    A zero-length window (start == end) is ambiguous — it could mean "off" or
+    an all-day "on" sentinel — so it's treated as no usable window. The caller
+    then falls back to the on-state rather than risk reporting an on light as
+    off.
+    """
     start = _time_to_minutes(entry.get("startTime"))
     end = _time_to_minutes(entry.get("endTime"))
-    if start is None or end is None:
+    if start is None or end is None or start == end:
         return None
     return start, end
 

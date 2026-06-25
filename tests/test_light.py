@@ -211,6 +211,21 @@ def test_timer_schedule_calendar_wraps_year_end():
     assert _timer_schedule_is_on(data, datetime(2026, 12, 31, 18, 0)) is True
 
 
+def test_timer_schedule_zero_length_window_is_indeterminate():
+    # A blank/all-day slot (start == end) must not flip the light to off.
+    data = {"daily": [_daily_entry((0, 0), (0, 0))]}
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 20, 0)) is None
+    # A real window alongside a zero-length one still evaluates normally.
+    data = {
+        "daily": [
+            _daily_entry((0, 0), (0, 0)),
+            _daily_entry((18, 0), (23, 0)),
+        ]
+    }
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 14, 0)) is False
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 20, 0)) is True
+
+
 async def test_timer_mode_shows_off_when_schedule_off(hass, mock_api):
     """Timer mode with the lights outside their on-window must report OFF.
 
