@@ -99,9 +99,9 @@ class TrimlightApi:
         unparseable responses, and non-zero API result codes.
         """
         url = f"{API_BASE_URL}{path}"
-        async with self._lock:
-            result = None
-            for attempt in range(API_MAX_REQUEST_ATTEMPTS):
+        result = None
+        for attempt in range(API_MAX_REQUEST_ATTEMPTS):
+            async with self._lock:
                 elapsed = time.monotonic() - self._last_request_time
                 if elapsed < API_REQUEST_MIN_INTERVAL:
                     await asyncio.sleep(API_REQUEST_MIN_INTERVAL - elapsed)
@@ -125,11 +125,16 @@ class TrimlightApi:
                         "Transient error on %s (attempt %d/%d), retrying: %s",
                         path, attempt + 1, API_MAX_REQUEST_ATTEMPTS, err,
                     )
-                    await asyncio.sleep(API_RETRY_BASE_BACKOFF * 2**attempt)
                 finally:
                     # Stamp even on failure: the server may have processed the
                     # request, so the next one must still be spaced out.
                     self._last_request_time = time.monotonic()
+
+            # Back off *outside* the lock so a failing request doesn't hold up
+            # other requests (notably user on/off commands) behind its retry
+            # waits. Reached only on a retryable, non-final attempt; success
+            # breaks out of the loop and a hard failure raises above.
+            await asyncio.sleep(API_RETRY_BASE_BACKOFF * 2**attempt)
 
         if not isinstance(result, dict):
             raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")
