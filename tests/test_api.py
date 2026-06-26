@@ -20,6 +20,13 @@ def _mock_response(json_value):
     return resp
 
 
+@pytest.fixture(autouse=True)
+def _no_sleep():
+    """Make retry backoff and rate-limit delays instant during tests."""
+    with patch("custom_components.trimlight.api.asyncio.sleep", AsyncMock()):
+        yield
+
+
 @pytest.fixture
 def api():
     """Return a TrimlightApi instance with a mocked session."""
@@ -128,6 +135,62 @@ class TestRequest:
 
         with pytest.raises(TrimlightApiError, match="not JSON"):
             await api._request("GET", "/some/path")
+
+    @pytest.mark.asyncio
+    async def test_retries_transient_5xx_then_succeeds(self, api):
+        """A transient 502 should be retried and recover within the same call."""
+        bad = _mock_response(None)
+        bad.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=502
+            )
+        )
+        good = _mock_response({"code": 0, "payload": {"ok": True}})
+        api._session.request = AsyncMock(side_effect=[bad, good])
+
+        result = await api._request("GET", "/some/path")
+        assert result == {"ok": True}
+        assert api._session.request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retries_exhausted_raises(self, api):
+        """Persistent transient errors raise after the attempt budget is spent."""
+        bad = _mock_response(None)
+        bad.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=503
+            )
+        )
+        api._session.request = AsyncMock(return_value=bad)
+
+        with pytest.raises(TrimlightApiError):
+            await api._request("GET", "/some/path")
+        assert api._session.request.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_client_4xx(self, api):
+        """A 4xx is deterministic and must fail fast without retrying."""
+        bad = _mock_response(None)
+        bad.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=400
+            )
+        )
+        api._session.request = AsyncMock(return_value=bad)
+
+        with pytest.raises(TrimlightApiError):
+            await api._request("GET", "/some/path")
+        assert api._session.request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_api_result_code(self, api):
+        """A non-zero API result code (e.g. device offline) is not retried."""
+        mock_resp = _mock_response({"code": 10008, "desc": "Device is offline"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(TrimlightApiError, match="10008"):
+            await api._request("POST", "/v1/oauth/resources/device/get")
+        assert api._session.request.call_count == 1
 
     @pytest.mark.asyncio
     async def test_raises_on_non_dict_response(self, api):

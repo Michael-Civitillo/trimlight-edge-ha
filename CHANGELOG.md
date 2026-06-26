@@ -5,15 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.4] - 2026-06-24
+## [1.1.4] - 2026-06-26
 
 ### Fixed
 - Lights on a timer schedule now show as off in Home Assistant once the schedule turns them off — the device keeps reporting timer mode (`switchState=2`) whether the lights are currently lit or not, so the running state is now derived from the schedule's on/off windows instead of treating timer mode as always on ([#10])
+- Transient cloud errors (502/504, timeouts, dropped connections) are now retried with backoff instead of failing the whole update, so a brief blip from `trimlight.ledhue.com` no longer flips the integration to "unavailable" ([#12])
+- A device that's temporarily offline no longer loses its effect list and timer schedule in Home Assistant — the last-known detail is kept while only the live fields (connectivity, switch state) refresh, so the entity restores cleanly when the device comes back ([#12])
+- The "Could not fetch detail for device" warning is now logged once per outage instead of on every 30-second poll, so an offline device no longer floods the log ([#12])
 
 ### Thanks
 - [@CptSugarFree](https://github.com/CptSugarFree) for reporting that timer-mode lights showed as on after the schedule turned them off ([#10])
+- [@jeffnewbold](https://github.com/jeffnewbold) for reporting the offline/error-fetching-data behaviour ([#12])
 
 [#10]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/10
+[#12]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/12
 
 ## [1.1.3] - 2026-06-23
 
