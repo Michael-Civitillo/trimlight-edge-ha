@@ -5,6 +5,7 @@ from __future__ import annotations
 import colorsys
 import logging
 import time
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.light import (
@@ -134,35 +135,51 @@ def _calendar_active_today(entry: dict[str, Any], now: Any) -> bool:
     return now_md >= start_md or now_md <= end_md
 
 
-def _active_windows(data: dict[str, Any], now: Any) -> list[tuple[int, int]]:
-    """Collect every on-window in effect today (daily + calendar)."""
-    windows: list[tuple[int, int]] = []
+def _entry_vote(
+    entry: dict[str, Any], now: Any, now_minutes: int, applies: Any
+) -> bool | None:
+    """Vote on whether one schedule entry has the lights on right now.
 
-    daily = data.get("daily")
-    if isinstance(daily, list):
-        for entry in daily:
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("enable", True):
-                continue
-            if not _daily_applies_today(entry, now):
-                continue
-            window = _window_minutes(entry)
-            if window is not None:
-                windows.append(window)
+    ``applies`` is a callable taking a reference date and returning True if the
+    schedule runs on that date (day-of-week repetition for daily entries, the
+    date range for calendar events).
 
-    calendar = data.get("calendar")
-    if isinstance(calendar, list):
-        for entry in calendar:
-            if not isinstance(entry, dict):
-                continue
-            if not _calendar_active_today(entry, now):
-                continue
-            window = _window_minutes(entry)
-            if window is not None:
-                windows.append(window)
+    Returns:
+        True  — now is inside this entry's on-window and it runs today.
+        False — this entry runs today but now is outside its window (off vote).
+        None  — the entry contributes nothing (disabled, no usable window, or
+                it doesn't run on any day relevant to now).
 
-    return windows
+    A window that wraps past midnight (e.g. 22:00 -> 02:00) is split into a head
+    segment that belongs to today and a tail segment that belongs to the
+    schedule that started *yesterday*, so day-of-week / date applicability is
+    checked against the day each segment actually belongs to rather than always
+    against ``now``.
+    """
+    if not entry.get("enable", True):
+        return None
+    window = _window_minutes(entry)
+    if window is None:
+        return None
+    start, end = window
+    yesterday = now - timedelta(days=1)
+    inside = _now_in_window(now_minutes, start, end)
+
+    if start < end:
+        # Same-day window: only meaningful if the schedule runs today.
+        return inside if applies(now) else None
+
+    # Window wraps midnight.
+    if inside:
+        # The head segment (now >= start) belongs to today; the tail segment
+        # (now < end) belongs to the run that started yesterday.
+        ref = now if now_minutes >= start else yesterday
+        return True if applies(ref) else None
+    # Outside the window entirely: an off vote only if the schedule runs on a
+    # day whose window touches now (tonight's head or this morning's tail).
+    if applies(now) or applies(yesterday):
+        return False
+    return None
 
 
 def _timer_schedule_is_on(data: dict[str, Any], now: Any) -> bool | None:
@@ -184,15 +201,41 @@ def _timer_schedule_is_on(data: dict[str, Any], now: Any) -> bool | None:
     this can only ever leave a window on that the device turned off — it never
     reports an on light as off, which keeps the fallback safe.
     """
-    windows = _active_windows(data, now)
-    if not windows:
-        return None
-
     now_minutes = now.hour * 60 + now.minute
-    for start, end in windows:
-        if _now_in_window(now_minutes, start, end):
-            return True
-    return False
+    votes: list[bool | None] = []
+
+    daily = data.get("daily")
+    if isinstance(daily, list):
+        for entry in daily:
+            if not isinstance(entry, dict):
+                continue
+            votes.append(
+                _entry_vote(
+                    entry,
+                    now,
+                    now_minutes,
+                    lambda ref, e=entry: _daily_applies_today(e, ref),
+                )
+            )
+
+    calendar = data.get("calendar")
+    if isinstance(calendar, list):
+        for entry in calendar:
+            if not isinstance(entry, dict):
+                continue
+            votes.append(
+                _entry_vote(
+                    entry,
+                    now,
+                    now_minutes,
+                    lambda ref, e=entry: _calendar_active_today(e, ref),
+                )
+            )
+
+    decided = [v for v in votes if v is not None]
+    if not decided:
+        return None
+    return any(decided)
 
 
 def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
@@ -291,7 +334,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
             return None
         if switch_state == SWITCH_STATE_OFF:
             return False
-        if switch_state == SWITCH_STATE_TIMER:
+        # Only derive the timer running-state from the schedule when the detail
+        # is live. While a detail fetch is failing the carried-forward schedule
+        # is stale and may no longer match the device, so fall back to "on".
+        if switch_state == SWITCH_STATE_TIMER and not data.get("detail_stale"):
             scheduled = _timer_schedule_is_on(data, dt_util.now())
             if scheduled is not None:
                 return scheduled
