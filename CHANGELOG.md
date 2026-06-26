@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-06-26
+
+### Fixed
+- Retry backoff no longer holds the API lock: a failing cloud request used to block every other request (including a user pressing on/off) behind its full retry budget. The backoff now waits outside the lock, so commands stay responsive during a transient outage.
+- Timer schedules that wrap past midnight are now read against the correct day. A weekday/weekend window like 22:00 → 02:00 kept its after-midnight hours attributed to the wrong day, which could drop the window and misreport the light's state.
+- Disabled calendar events are now ignored when deriving timer state, matching how disabled daily schedules are already skipped. A disabled calendar event covering the current time no longer reports the light as on.
+- While a device's detail fetch is failing, the carried-forward schedule is flagged stale and timer mode falls back to "on" instead of deriving on/off from a schedule that may no longer match the device.
+
+### Internal
+- Unified the daily and calendar schedule-evaluation paths into a single window-voting helper to remove the duplicated loops.
+
 ## [1.1.5] - 2026-06-26
 
 ### Fixed
