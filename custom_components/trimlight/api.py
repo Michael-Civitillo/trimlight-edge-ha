@@ -19,13 +19,34 @@ import aiohttp
 
 from homeassistant.util import dt as dt_util
 
-from .const import API_BASE_URL, API_REQUEST_MIN_INTERVAL
+from .const import (
+    API_BASE_URL,
+    API_MAX_REQUEST_ATTEMPTS,
+    API_REQUEST_MIN_INTERVAL,
+    API_RETRY_BASE_BACKOFF,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class TrimlightApiError(Exception):
     """Raised when the Trimlight API returns a non-zero result code."""
+
+
+def _is_retryable(err: Exception) -> bool:
+    """Return True for transient transport errors worth retrying.
+
+    Server-side 5xx and rate-limit (429) responses, timeouts, and connection
+    errors are transient. Client errors (4xx) and unparseable bodies are not
+    retried — they won't change on a repeat. API result-code errors (e.g. a
+    device being offline) never reach here; they're raised after a successful
+    HTTP exchange.
+    """
+    if isinstance(err, aiohttp.ClientResponseError):
+        return err.status >= 500 or err.status == 429
+    if isinstance(err, (TimeoutError, aiohttp.ClientError)):
+        return True
+    return False
 
 
 class TrimlightApi:
@@ -71,31 +92,44 @@ class TrimlightApi:
         Requests are serialized via a lock and rate-limited to prevent
         the Trimlight server from returning error 20000.
 
+        Transient transport errors (5xx, timeouts, dropped connections) are
+        retried with exponential backoff; everything else fails fast.
+
         Raises TrimlightApiError on network failures, timeouts, HTTP errors,
         unparseable responses, and non-zero API result codes.
         """
+        url = f"{API_BASE_URL}{path}"
         async with self._lock:
-            elapsed = time.monotonic() - self._last_request_time
-            if elapsed < API_REQUEST_MIN_INTERVAL:
-                await asyncio.sleep(API_REQUEST_MIN_INTERVAL - elapsed)
+            result = None
+            for attempt in range(API_MAX_REQUEST_ATTEMPTS):
+                elapsed = time.monotonic() - self._last_request_time
+                if elapsed < API_REQUEST_MIN_INTERVAL:
+                    await asyncio.sleep(API_REQUEST_MIN_INTERVAL - elapsed)
 
-            url = f"{API_BASE_URL}{path}"
-            headers = self._build_headers()
-            try:
-                async with asyncio.timeout(10):
-                    resp = await self._session.request(
-                        method, url, headers=headers, json=data
+                headers = self._build_headers()
+                try:
+                    async with asyncio.timeout(10):
+                        resp = await self._session.request(
+                            method, url, headers=headers, json=data
+                        )
+                        resp.raise_for_status()
+                        result = await resp.json()
+                    break
+                except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+                    last_attempt = attempt == API_MAX_REQUEST_ATTEMPTS - 1
+                    if last_attempt or not _is_retryable(err):
+                        raise TrimlightApiError(
+                            f"Request to {path} failed: {err}"
+                        ) from err
+                    _LOGGER.debug(
+                        "Transient error on %s (attempt %d/%d), retrying: %s",
+                        path, attempt + 1, API_MAX_REQUEST_ATTEMPTS, err,
                     )
-                    resp.raise_for_status()
-                    result = await resp.json()
-            except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-                raise TrimlightApiError(
-                    f"Request to {path} failed: {err}"
-                ) from err
-            finally:
-                # Stamp even on failure: the server may have processed the
-                # request, so the next one must still be spaced out.
-                self._last_request_time = time.monotonic()
+                    await asyncio.sleep(API_RETRY_BASE_BACKOFF * 2**attempt)
+                finally:
+                    # Stamp even on failure: the server may have processed the
+                    # request, so the next one must still be spaced out.
+                    self._last_request_time = time.monotonic()
 
         if not isinstance(result, dict):
             raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")

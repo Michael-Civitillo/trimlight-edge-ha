@@ -24,6 +24,12 @@ SCHEDULE_REPETITION_WEEKEND = 3
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3
 
+# Transient-error retry policy for cloud requests. The Trimlight cloud
+# occasionally returns a 502/504 or drops a connection; a couple of quick
+# retries ride those out instead of failing the whole update.
+API_MAX_REQUEST_ATTEMPTS = 3
+API_RETRY_BASE_BACKOFF = 0.5  # seconds; doubled on each retry
+
 # Custom effect saved on the device for HA color picker control.
 HA_COLOR_EFFECT_NAME = "HA Color"
 

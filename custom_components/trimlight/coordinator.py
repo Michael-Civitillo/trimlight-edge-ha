@@ -31,6 +31,9 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL),
         )
         self.api = api
+        # Device IDs whose detail fetch is currently failing, so the warning is
+        # logged once per outage rather than on every poll.
+        self._detail_failures: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the Trimlight API."""
@@ -41,6 +44,7 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Failed to list Trimlight devices: {err}"
             ) from err
 
+        previous = self.data or {}
         result: dict[str, Any] = {}
         for device in devices:
             device_id: str = device["deviceId"]
@@ -50,20 +54,37 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.api.notify_update_shadow(device_id)
             try:
                 detail = await self.api.get_device(device_id)
-                merged = {**device, **detail}
-                _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
-                _LOGGER.debug(
-                    "Device %s switchState=%s daily=%s calendar=%s",
-                    device_id,
-                    merged.get("switchState"),
-                    merged.get("daily"),
-                    merged.get("calendar"),
-                )
-                result[device_id] = merged
             except TrimlightApiError as err:
-                _LOGGER.warning(
-                    "Could not fetch detail for device %s: %s", device_id, err
-                )
-                result[device_id] = device
+                # Keep the last-known detail (effects, schedules) so the entity
+                # doesn't lose its effect list or timer schedule while the
+                # device is briefly offline; the list-level fields (notably
+                # connectivity) still refresh from this poll. Warn once per
+                # outage instead of on every 30s poll.
+                result[device_id] = {**previous.get(device_id, {}), **device}
+                if device_id not in self._detail_failures:
+                    self._detail_failures.add(device_id)
+                    _LOGGER.warning(
+                        "Could not fetch detail for device %s: %s", device_id, err
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Still cannot fetch detail for device %s: %s", device_id, err
+                    )
+                continue
+
+            if device_id in self._detail_failures:
+                self._detail_failures.discard(device_id)
+                _LOGGER.info("Device %s detail fetch recovered", device_id)
+
+            merged = {**device, **detail}
+            _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
+            _LOGGER.debug(
+                "Device %s switchState=%s daily=%s calendar=%s",
+                device_id,
+                merged.get("switchState"),
+                merged.get("daily"),
+                merged.get("calendar"),
+            )
+            result[device_id] = merged
 
         return result
