@@ -104,3 +104,19 @@ async def test_detail_recovers_after_failure(coordinator, api):
     api.get_device = AsyncMock(return_value=dict(DETAIL))
     await coordinator._async_update_data()
     assert DEVICE_ID not in coordinator._detail_failures
+
+
+async def test_detail_failure_marks_data_stale(coordinator, api):
+    """Carried-forward detail is flagged stale so consumers don't trust it."""
+    coordinator.data = await coordinator._async_update_data()
+    assert "_detail_stale" not in coordinator.data[DEVICE_ID]
+
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("Device is offline"))
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["_detail_stale"] is True
+
+    # A successful poll clears the stale marker again.
+    api.get_device = AsyncMock(return_value=dict(DETAIL))
+    coordinator.data = data
+    data = await coordinator._async_update_data()
+    assert "_detail_stale" not in data[DEVICE_ID]

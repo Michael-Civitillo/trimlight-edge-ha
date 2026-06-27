@@ -47,10 +47,11 @@ def _daily_entry(start, end, *, enable=True, repetition=1):
     }
 
 
-def _calendar_entry(start_date, end_date, start, end):
+def _calendar_entry(start_date, end_date, start, end, *, enable=True):
     """Build one calendar event from (month, day) and (hour, minute) tuples."""
     return {
         "effectId": 1,
+        "enable": enable,
         "startDate": {"month": start_date[0], "day": start_date[1]},
         "endDate": {"month": end_date[0], "day": end_date[1]},
         "startTime": {"hours": start[0], "minutes": start[1]},
@@ -211,6 +212,44 @@ def test_timer_schedule_calendar_wraps_year_end():
     assert _timer_schedule_is_on(data, datetime(2026, 12, 31, 18, 0)) is True
 
 
+def test_timer_schedule_ignores_disabled_calendar_entries():
+    # A disabled calendar event must not be treated as an active on-window,
+    # the same way disabled daily entries are skipped.
+    data = {
+        "daily": [],
+        "calendar": [_calendar_entry((12, 24), (12, 26), (17, 0), (23, 0), enable=False)],
+    }
+    assert _timer_schedule_is_on(data, datetime(2026, 12, 25, 18, 0)) is None
+
+
+def test_timer_schedule_weekend_window_wraps_midnight():
+    # Weekend schedule 22:00 -> 02:00. The lit tail after midnight belongs to
+    # the night that started the previous (weekend) day.
+    data = {"daily": [_daily_entry((22, 0), (2, 0), repetition=3)]}
+    # Sunday 23:00 — head of a weekend night -> on.
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 21, 23, 0)) is True
+    # Monday 01:00 — tail of Sunday's weekend night -> on (not dropped).
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 22, 1, 0)) is True
+    # Monday 23:00 — Monday is not a weekend night, so the schedule isn't
+    # running -> indeterminate, not a spurious on.
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 22, 23, 0)) is None
+
+
+def test_timer_schedule_weekday_window_wraps_midnight():
+    # Weekday schedule 22:00 -> 02:00. Saturday 01:00 is the tail of Friday's
+    # (week day) night, so the lights are on.
+    data = {"daily": [_daily_entry((22, 0), (2, 0), repetition=2)]}
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 27, 1, 0)) is True
+    # Saturday 23:00 is a weekend night -> schedule not running -> indeterminate.
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 27, 23, 0)) is None
+
+
+def test_timer_schedule_everyday_window_wraps_midnight():
+    data = {"daily": [_daily_entry((22, 0), (2, 0))]}
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 1, 0)) is True
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 12, 0)) is False
+
+
 def test_timer_schedule_zero_length_window_is_indeterminate():
     # A blank/all-day slot (start == end) must not flip the light to off.
     data = {"daily": [_daily_entry((0, 0), (0, 0))]}
@@ -276,6 +315,29 @@ async def test_timer_mode_falls_back_to_on_without_schedule(hass, mock_api):
             coordinator_data=data,
             entry_id="test_entry_timer_nosched",
             unique_id="test_client_id_timer_nosched",
+        )
+        state = hass.states.get(_entity_id())
+    assert state.state == STATE_ON
+
+
+async def test_timer_mode_stale_detail_falls_back_to_on(hass, mock_api):
+    """A stale (carried-forward) schedule must not be trusted to report OFF.
+
+    While a detail fetch is failing the schedule is last-known, not live, so
+    timer mode reverts to the safe "on" reading instead of deriving off from a
+    schedule that may no longer match the device.
+    """
+    data = _timer_device([_daily_entry((18, 0), (23, 0))])
+    data[MOCK_DEVICE_ID]["_detail_stale"] = True
+    with patch(
+        "custom_components.trimlight.light.dt_util.now",
+        return_value=datetime(2026, 6, 24, 14, 0),  # outside the on-window
+    ):
+        await _setup_integration(
+            hass, mock_api,
+            coordinator_data=data,
+            entry_id="test_entry_timer_stale",
+            unique_id="test_client_id_timer_stale",
         )
         state = hass.states.get(_entity_id())
     assert state.state == STATE_ON
