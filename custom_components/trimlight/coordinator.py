@@ -61,10 +61,12 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # connectivity) still refresh from this poll. Warn once per
                 # outage instead of on every 30s poll. Mark the detail stale so
                 # consumers don't trust the carried-forward schedule as live.
+                # The key is underscore-prefixed so it can't collide with a real
+                # API field or leak as a device attribute.
                 result[device_id] = {
                     **previous.get(device_id, {}),
                     **device,
-                    "detail_stale": True,
+                    "_detail_stale": True,
                 }
                 if device_id not in self._detail_failures:
                     self._detail_failures.add(device_id)

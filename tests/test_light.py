@@ -328,7 +328,7 @@ async def test_timer_mode_stale_detail_falls_back_to_on(hass, mock_api):
     schedule that may no longer match the device.
     """
     data = _timer_device([_daily_entry((18, 0), (23, 0))])
-    data[MOCK_DEVICE_ID]["detail_stale"] = True
+    data[MOCK_DEVICE_ID]["_detail_stale"] = True
     with patch(
         "custom_components.trimlight.light.dt_util.now",
         return_value=datetime(2026, 6, 24, 14, 0),  # outside the on-window

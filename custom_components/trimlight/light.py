@@ -78,6 +78,8 @@ def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
 
     Handles windows that wrap past midnight (e.g. 18:00 -> 02:00).
     """
+    # Zero-length windows are normally filtered out by ``_window_minutes``
+    # before this is reached; this guard only matters for direct callers/tests.
     if start == end:
         return False
     if start < end:
@@ -140,7 +142,7 @@ def _entry_vote(
 ) -> bool | None:
     """Vote on whether one schedule entry has the lights on right now.
 
-    ``applies`` is a callable taking a reference date and returning True if the
+    ``applies`` is a callable ``(entry, ref_date) -> bool`` returning True if the
     schedule runs on that date (day-of-week repetition for daily entries, the
     date range for calendar events).
 
@@ -154,7 +156,10 @@ def _entry_vote(
     segment that belongs to today and a tail segment that belongs to the
     schedule that started *yesterday*, so day-of-week / date applicability is
     checked against the day each segment actually belongs to rather than always
-    against ``now``.
+    against ``now``. This assumes the device attributes a wrapping window to its
+    start day (the night it begins); if the firmware instead keyed it to the end
+    day the head/tail day checks would be inverted. The fallback stays in the
+    safe "never report an on light as off" direction either way.
     """
     if not entry.get("enable", True):
         return None
@@ -167,17 +172,17 @@ def _entry_vote(
 
     if start < end:
         # Same-day window: only meaningful if the schedule runs today.
-        return inside if applies(now) else None
+        return inside if applies(entry, now) else None
 
     # Window wraps midnight.
     if inside:
         # The head segment (now >= start) belongs to today; the tail segment
         # (now < end) belongs to the run that started yesterday.
         ref = now if now_minutes >= start else yesterday
-        return True if applies(ref) else None
+        return True if applies(entry, ref) else None
     # Outside the window entirely: an off vote only if the schedule runs on a
     # day whose window touches now (tonight's head or this morning's tail).
-    if applies(now) or applies(yesterday):
+    if applies(entry, now) or applies(entry, yesterday):
         return False
     return None
 
@@ -202,40 +207,27 @@ def _timer_schedule_is_on(data: dict[str, Any], now: Any) -> bool | None:
     reports an on light as off, which keeps the fallback safe.
     """
     now_minutes = now.hour * 60 + now.minute
-    votes: list[bool | None] = []
-
-    daily = data.get("daily")
-    if isinstance(daily, list):
-        for entry in daily:
+    decided = False
+    for source, applies in (
+        ("daily", _daily_applies_today),
+        ("calendar", _calendar_active_today),
+    ):
+        entries = data.get(source)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            votes.append(
-                _entry_vote(
-                    entry,
-                    now,
-                    now_minutes,
-                    lambda ref, e=entry: _daily_applies_today(e, ref),
-                )
-            )
-
-    calendar = data.get("calendar")
-    if isinstance(calendar, list):
-        for entry in calendar:
-            if not isinstance(entry, dict):
+            vote = _entry_vote(entry, now, now_minutes, applies)
+            if vote is None:
                 continue
-            votes.append(
-                _entry_vote(
-                    entry,
-                    now,
-                    now_minutes,
-                    lambda ref, e=entry: _calendar_active_today(e, ref),
-                )
-            )
+            if vote:
+                return True
+            decided = True
 
-    decided = [v for v in votes if v is not None]
-    if not decided:
-        return None
-    return any(decided)
+    # No window said "on". If at least one applicable window said "off" the
+    # schedule positively determines off; otherwise it's indeterminate.
+    return False if decided else None
 
 
 def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
@@ -337,7 +329,7 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         # Only derive the timer running-state from the schedule when the detail
         # is live. While a detail fetch is failing the carried-forward schedule
         # is stale and may no longer match the device, so fall back to "on".
-        if switch_state == SWITCH_STATE_TIMER and not data.get("detail_stale"):
+        if switch_state == SWITCH_STATE_TIMER and not data.get("_detail_stale"):
             scheduled = _timer_schedule_is_on(data, dt_util.now())
             if scheduled is not None:
                 return scheduled
