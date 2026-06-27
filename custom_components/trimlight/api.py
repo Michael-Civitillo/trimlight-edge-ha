@@ -89,8 +89,11 @@ class TrimlightApi:
     ) -> Any:
         """Make an authenticated request.
 
-        Requests are serialized via a lock and rate-limited to prevent
-        the Trimlight server from returning error 20000.
+        Each HTTP exchange is serialized via a lock and rate-limited to prevent
+        the Trimlight server from returning error 20000. The lock is held per
+        attempt, not across the whole retry sequence: a retrying request waits
+        out its backoff *without* the lock so it doesn't block other requests,
+        and re-checks the rate-limit spacing when it re-acquires the lock.
 
         Transient transport errors (5xx, timeouts, dropped connections) are
         retried with exponential backoff; everything else fails fast.
