@@ -24,6 +24,11 @@ SCHEDULE_REPETITION_WEEKEND = 3
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3
 
+# API result codes that mean the client credentials were rejected
+# (invalid clientId / signature per API docs section 2). These trigger a
+# reauth flow instead of being treated as a transient failure.
+API_AUTH_ERROR_CODES = frozenset({10001})
+
 # Transient-error retry policy for cloud requests. The Trimlight cloud
 # occasionally returns a 502/504 or drops a connection; a couple of quick
 # retries ride those out instead of failing the whole update.

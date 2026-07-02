@@ -7,10 +7,31 @@ on:
     paths:
       - "custom_components/trimlight/manifest.json"
 
+permissions:
+  contents: read
+
 jobs:
+  tests:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements_test.txt
+
+      - name: Run tests
+        run: pytest tests/ -q
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    needs: tests
     permissions:
       contents: write
     steps:
@@ -25,11 +46,27 @@ jobs:
 
       - name: Check if tag already exists
         id: tag_check
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if git ls-remote --tags origin "${{ steps.version.outputs.tag }}" | grep -q "${{ steps.version.outputs.tag }}"; then
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract this version's changelog section
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_body.md
+          if ! grep -q "[^[:space:]]" release_body.md; then
+            echo "See CHANGELOG.md for details." > release_body.md
           fi
 
       - name: Create release
@@ -38,5 +75,5 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          body_path: CHANGELOG.md
+          body_path: release_body.md
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -20,6 +20,7 @@ import aiohttp
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    API_AUTH_ERROR_CODES,
     API_BASE_URL,
     API_MAX_REQUEST_ATTEMPTS,
     API_REQUEST_MIN_INTERVAL,
@@ -31,6 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 
 class TrimlightApiError(Exception):
     """Raised when the Trimlight API returns a non-zero result code."""
+
+
+class TrimlightAuthError(TrimlightApiError):
+    """Raised when the API rejects the client credentials."""
 
 
 def _is_retryable(err: Exception) -> bool:
@@ -85,7 +90,11 @@ class TrimlightApi:
         }
 
     async def _request(
-        self, method: str, path: str, data: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        data: dict[str, Any] | None = None,
+        attempts: int = API_MAX_REQUEST_ATTEMPTS,
     ) -> Any:
         """Make an authenticated request.
 
@@ -96,14 +105,17 @@ class TrimlightApi:
         and re-checks the rate-limit spacing when it re-acquires the lock.
 
         Transient transport errors (5xx, timeouts, dropped connections) are
-        retried with exponential backoff; everything else fails fast.
+        retried with exponential backoff up to ``attempts`` tries; everything
+        else fails fast. Pass ``attempts=1`` for best-effort or non-idempotent
+        calls that must not be retried.
 
-        Raises TrimlightApiError on network failures, timeouts, HTTP errors,
-        unparseable responses, and non-zero API result codes.
+        Raises TrimlightAuthError when the credentials are rejected, and
+        TrimlightApiError on network failures, timeouts, HTTP errors,
+        unparseable responses, and other non-zero API result codes.
         """
         url = f"{API_BASE_URL}{path}"
         result = None
-        for attempt in range(API_MAX_REQUEST_ATTEMPTS):
+        for attempt in range(attempts):
             async with self._lock:
                 elapsed = time.monotonic() - self._last_request_time
                 if elapsed < API_REQUEST_MIN_INTERVAL:
@@ -119,14 +131,14 @@ class TrimlightApi:
                         result = await resp.json()
                     break
                 except (aiohttp.ClientError, TimeoutError, ValueError) as err:
-                    last_attempt = attempt == API_MAX_REQUEST_ATTEMPTS - 1
+                    last_attempt = attempt == attempts - 1
                     if last_attempt or not _is_retryable(err):
                         raise TrimlightApiError(
                             f"Request to {path} failed: {err}"
                         ) from err
                     _LOGGER.debug(
                         "Transient error on %s (attempt %d/%d), retrying: %s",
-                        path, attempt + 1, API_MAX_REQUEST_ATTEMPTS, err,
+                        path, attempt + 1, attempts, err,
                     )
                 finally:
                     # Stamp even on failure: the server may have processed the
@@ -142,6 +154,10 @@ class TrimlightApi:
         if not isinstance(result, dict):
             raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")
         code = result.get("code")
+        if code in API_AUTH_ERROR_CODES:
+            raise TrimlightAuthError(
+                f"API auth error {code}: {result.get('desc', 'unknown')}"
+            )
         if code != 0:
             raise TrimlightApiError(
                 f"API error {code}: {result.get('desc', 'unknown')}"
@@ -180,8 +196,12 @@ class TrimlightApi:
             "seconds": now.second,
         }
 
-    async def get_device(self, device_id: str) -> dict:
-        """Return full detail for a single device (effects, schedules, etc.)."""
+    async def get_device(self, device_id: str) -> dict[str, Any] | None:
+        """Return full detail for a single device (effects, schedules, etc.).
+
+        Returns None if the API answers success without a payload; callers
+        must treat that as a failed detail fetch.
+        """
         return await self._request(
             "POST",
             "/v1/oauth/resources/device/get",
@@ -189,12 +209,18 @@ class TrimlightApi:
         )
 
     async def notify_update_shadow(self, device_id: str) -> None:
-        """Ask the device to push its latest shadow data before polling."""
+        """Ask the device to push its latest shadow data before polling.
+
+        Best-effort: the result is discarded, so a failure is swallowed and
+        the request is never retried — running the full retry ladder here
+        would only stretch the poll cycle for nothing.
+        """
         try:
             await self._request(
                 "GET",
                 "/v1/oauth/resources/device/notify-update-shadow",
                 {"deviceId": device_id, "currentDate": self._current_date()},
+                attempts=1,
             )
         except TrimlightApiError:
             pass  # Non-critical; best-effort
@@ -224,9 +250,15 @@ class TrimlightApi:
 
         Set effect_payload["id"] = -1 to create new, or an existing ID to update.
         Returns the payload containing the saved effect's id.
+
+        Creates are not retried: a timed-out create may have been processed
+        server-side, and retrying it would leave a duplicate effect on the
+        device. Updates are idempotent and keep the normal retry policy.
         """
+        is_create = effect_payload.get("id", -1) == -1
         return await self._request(
             "POST",
             "/v1/oauth/resources/device/effect/save",
             {"deviceId": device_id, "payload": effect_payload},
+            attempts=1 if is_create else API_MAX_REQUEST_ATTEMPTS,
         )

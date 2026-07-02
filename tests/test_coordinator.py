@@ -4,9 +4,17 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from custom_components.trimlight.api import TrimlightApi, TrimlightApiError
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.trimlight.api import (
+    TrimlightApi,
+    TrimlightApiError,
+    TrimlightAuthError,
+)
+from custom_components.trimlight.const import DOMAIN
 from custom_components.trimlight.coordinator import TrimlightCoordinator
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -31,16 +39,41 @@ def api():
     return api
 
 
+def _make_coordinator(hass, api):
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    return TrimlightCoordinator(hass, entry, api)
+
+
 @pytest.fixture
 def coordinator(hass, api):
-    return TrimlightCoordinator(hass, api)
+    return _make_coordinator(hass, api)
 
 
 async def test_list_failure_raises_update_failed(hass, api):
     """A failure listing devices must surface as UpdateFailed."""
     api.get_devices = AsyncMock(side_effect=TrimlightApiError("502 Bad Gateway"))
-    coordinator = TrimlightCoordinator(hass, api)
+    coordinator = _make_coordinator(hass, api)
     with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_auth_failure_raises_config_entry_auth_failed(hass, api):
+    """Rejected credentials must trigger HA's reauth flow, not a retry loop."""
+    api.get_devices = AsyncMock(
+        side_effect=TrimlightAuthError("API auth error 10001: auth error")
+    )
+    coordinator = _make_coordinator(hass, api)
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+
+async def test_detail_auth_failure_raises_config_entry_auth_failed(coordinator, api):
+    """An auth rejection on the detail call is not a per-device outage."""
+    api.get_device = AsyncMock(
+        side_effect=TrimlightAuthError("API auth error 10001: auth error")
+    )
+    with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
 
 
@@ -51,27 +84,59 @@ async def test_merges_list_and_detail(coordinator):
     assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
 
 
+async def test_malformed_list_entry_is_skipped(coordinator, api):
+    """One list entry without a deviceId must not fail the whole update."""
+    api.get_devices = AsyncMock(
+        return_value=[{"name": "ghost"}, dict(LIST_ENTRY)]
+    )
+    data = await coordinator._async_update_data()
+    assert list(data) == [DEVICE_ID]
+
+
+async def test_detail_none_treated_as_failure(coordinator, api):
+    """A success response without a payload must not crash the merge."""
+    coordinator.data = await coordinator._async_update_data()
+
+    api.get_device = AsyncMock(return_value=None)
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["_detail_stale"] is True
+    # Last-known detail survives, same as any other detail failure.
+    assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
+
+
+async def test_offline_device_skips_detail_fetch(coordinator, api):
+    """An offline device keeps last-known detail without extra requests."""
+    coordinator.data = await coordinator._async_update_data()
+
+    api.get_devices = AsyncMock(return_value=[{**LIST_ENTRY, "connectivity": 0}])
+    api.notify_update_shadow.reset_mock()
+    api.get_device.reset_mock()
+
+    data = await coordinator._async_update_data()
+    api.notify_update_shadow.assert_not_called()
+    api.get_device.assert_not_called()
+    assert data[DEVICE_ID]["connectivity"] == 0
+    assert data[DEVICE_ID]["_detail_stale"] is True
+    assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
+
+
 async def test_detail_failure_preserves_previous_detail(coordinator, api):
-    """An offline device keeps its last-known detail; list fields refresh."""
+    """A failing detail fetch keeps its last-known detail; list fields refresh."""
     coordinator.data = await coordinator._async_update_data()
 
     api.get_device = AsyncMock(
         side_effect=TrimlightApiError("API error 10008: Device is offline")
     )
-    api.get_devices = AsyncMock(
-        return_value=[{**LIST_ENTRY, "connectivity": 0}]
-    )
 
     data = await coordinator._async_update_data()
-    # Connectivity refreshes from the fresh list (now offline)...
-    assert data[DEVICE_ID]["connectivity"] == 0
-    # ...but the effect list survives so the entity doesn't blank out.
+    # ...the effect list survives so the entity doesn't blank out.
     assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
+    assert data[DEVICE_ID]["_detail_stale"] is True
 
 
 async def test_detail_failure_without_prior_detail_keeps_list(coordinator, api):
     """If detail never succeeded, fall back to list-only data (no crash)."""
-    api.get_device = AsyncMock(side_effect=TrimlightApiError("Device is offline"))
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("boom"))
     data = await coordinator._async_update_data()
     assert data[DEVICE_ID]["name"] == "Front"
     assert "effects" not in data[DEVICE_ID]
@@ -79,7 +144,7 @@ async def test_detail_failure_without_prior_detail_keeps_list(coordinator, api):
 
 async def test_detail_failure_warns_once(coordinator, api, caplog):
     """Repeated detail failures must warn once, not on every poll."""
-    api.get_device = AsyncMock(side_effect=TrimlightApiError("Device is offline"))
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("boom"))
     with caplog.at_level(
         logging.WARNING, logger="custom_components.trimlight.coordinator"
     ):
@@ -97,7 +162,7 @@ async def test_detail_failure_warns_once(coordinator, api, caplog):
 
 async def test_detail_recovers_after_failure(coordinator, api):
     """Once detail fetch recovers, the failure flag clears for next time."""
-    api.get_device = AsyncMock(side_effect=TrimlightApiError("Device is offline"))
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("boom"))
     coordinator.data = await coordinator._async_update_data()
     assert DEVICE_ID in coordinator._detail_failures
 
@@ -111,7 +176,7 @@ async def test_detail_failure_marks_data_stale(coordinator, api):
     coordinator.data = await coordinator._async_update_data()
     assert "_detail_stale" not in coordinator.data[DEVICE_ID]
 
-    api.get_device = AsyncMock(side_effect=TrimlightApiError("Device is offline"))
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("boom"))
     data = await coordinator._async_update_data()
     assert data[DEVICE_ID]["_detail_stale"] is True
 

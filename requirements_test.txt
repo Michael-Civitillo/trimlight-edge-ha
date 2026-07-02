@@ -1,5 +1,8 @@
-pytest>=7.4
-pytest-asyncio>=0.23
-pytest-homeassistant-custom-component>=0.13
-aiohttp
-aioresponses
+# Pinned so CI and local runs are reproducible: pytest-homeassistant-custom-component
+# releases track Home Assistant, and an unpinned resolve floats onto whatever
+# shipped last (or, on older Pythons, onto ancient builds that no longer install).
+# Bump all four together.
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-homeassistant-custom-component==0.13.195
+aiohttp==3.11.11

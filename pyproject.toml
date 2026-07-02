@@ -1,2 +1,32 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "B",      # bugbear
+    "ASYNC",  # async pitfalls
+    "DTZ",    # naive datetimes
+    "E4", "E7", "E9",
+    "F",      # pyflakes
+    "PLW",    # pylint warnings
+    "RUF",    # ruff-specific
+    "S",      # bandit
+]
+ignore = [
+    "RUF012", # HA entity class attributes follow core's plain-set convention
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",   # asserts are the point of tests
+    "S105",   # hardcoded test credentials
+    "S106",
+    "DTZ001", # naive datetimes are fine for pure schedule-math tests
+]
+"custom_components/trimlight/const.py" = [
+    "S105",   # CONF_CLIENT_SECRET is a config key name, not a secret
+]

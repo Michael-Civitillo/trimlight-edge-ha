@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import colorsys
 import logging
 import time
-from datetime import timedelta
-from typing import Any
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -17,18 +19,21 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from homeassistant.config_entries import ConfigEntry
-
+from .api import TrimlightApiError
 from .const import (
     DOMAIN,
     EFFECT_CATEGORY_CUSTOM,
     EFFECT_MODE_STATIC,
     HA_COLOR_EFFECT_NAME,
+    SCHEDULE_REPETITION_EVERYDAY,
+    SCHEDULE_REPETITION_TODAY,
     SCHEDULE_REPETITION_WEEKDAYS,
     SCHEDULE_REPETITION_WEEKEND,
     SWITCH_STATE_MANUAL,
@@ -37,7 +42,14 @@ from .const import (
 )
 from .coordinator import TrimlightCoordinator
 
+if TYPE_CHECKING:
+    from . import TrimlightConfigEntry
+
 _LOGGER = logging.getLogger(__name__)
+
+# All commands go through the API client's shared lock anyway; run entity
+# updates one at a time so commands don't pile up behind each other.
+PARALLEL_UPDATES = 1
 
 # Seconds to hold optimistic state after a command before trusting API state.
 _COMMAND_COOLDOWN = 60
@@ -58,8 +70,9 @@ def _time_to_minutes(obj: Any) -> int | None:
 
     Trimlight time objects use the same shape as the API ``currentDate``
     helper (``hours``/``minutes``). Older/alternate payloads may use
-    ``hour``/``minute``; both are accepted. Returns None if the value can't
-    be parsed so the caller can fall back to mode-based state.
+    ``hour``/``minute``; both are accepted. Returns None for missing or
+    out-of-range values so the caller can fall back to mode-based state
+    instead of treating garbage as a real window.
     """
     if not isinstance(obj, dict):
         return None
@@ -68,9 +81,13 @@ def _time_to_minutes(obj: Any) -> int | None:
     if hours is None or minutes is None:
         return None
     try:
-        return (int(hours) % 24) * 60 + (int(minutes) % 60)
+        hours = int(hours)
+        minutes = int(minutes)
     except (TypeError, ValueError):
         return None
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        return None
+    return hours * 60 + minutes
 
 
 def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
@@ -103,7 +120,7 @@ def _window_minutes(entry: dict[str, Any]) -> tuple[int, int] | None:
     return start, end
 
 
-def _daily_applies_today(entry: dict[str, Any], now: Any) -> bool:
+def _daily_applies_today(entry: dict[str, Any], now: datetime) -> bool:
     """Return True if a daily schedule's repetition includes today.
 
     Only the day sets we can identify positively (week days / weekend) are
@@ -116,10 +133,12 @@ def _daily_applies_today(entry: dict[str, Any], now: Any) -> bool:
         return not is_weekend
     if repetition == SCHEDULE_REPETITION_WEEKEND:
         return is_weekend
-    return True
+    if repetition in (SCHEDULE_REPETITION_EVERYDAY, SCHEDULE_REPETITION_TODAY):
+        return True
+    return True  # Unrecognised repetition: assume it applies.
 
 
-def _calendar_active_today(entry: dict[str, Any], now: Any) -> bool:
+def _calendar_active_today(entry: dict[str, Any], now: datetime) -> bool:
     """Return True if today's date falls within a calendar entry's range."""
     start = entry.get("startDate")
     end = entry.get("endDate")
@@ -138,7 +157,10 @@ def _calendar_active_today(entry: dict[str, Any], now: Any) -> bool:
 
 
 def _entry_vote(
-    entry: dict[str, Any], now: Any, now_minutes: int, applies: Any
+    entry: dict[str, Any],
+    now: datetime,
+    now_minutes: int,
+    applies: Callable[[dict[str, Any], datetime], bool],
 ) -> bool | None:
     """Vote on whether one schedule entry has the lights on right now.
 
@@ -148,18 +170,22 @@ def _entry_vote(
 
     Returns:
         True  — now is inside this entry's on-window and it runs today.
-        False — this entry runs today but now is outside its window (off vote).
+        False — this entry is positively not lighting anything right now:
+                either now is outside its window, or the window is same-day
+                and the schedule doesn't run today at all.
         None  — the entry contributes nothing (disabled, no usable window, or
-                it doesn't run on any day relevant to now).
+                a wrapping window whose day attribution is uncertain).
 
     A window that wraps past midnight (e.g. 22:00 -> 02:00) is split into a head
     segment that belongs to today and a tail segment that belongs to the
-    schedule that started *yesterday*, so day-of-week / date applicability is
-    checked against the day each segment actually belongs to rather than always
-    against ``now``. This assumes the device attributes a wrapping window to its
-    start day (the night it begins); if the firmware instead keyed it to the end
-    day the head/tail day checks would be inverted. The fallback stays in the
-    safe "never report an on light as off" direction either way.
+    schedule that started *yesterday*. When now is inside such a window but the
+    segment's day doesn't apply, the vote is None rather than False: this
+    assumes the device attributes a wrapping window to its start day (the night
+    it begins); if the firmware instead keyed it to the end day the head/tail
+    day checks would be inverted, and a False vote could report an on light as
+    off. Same-day windows carry no such ambiguity, so a repetition that
+    positively excludes today votes False — otherwise a weekdays-only schedule
+    would leave the light reported on for the whole weekend.
     """
     if not entry.get("enable", True):
         return None
@@ -167,27 +193,26 @@ def _entry_vote(
     if window is None:
         return None
     start, end = window
-    yesterday = now - timedelta(days=1)
     inside = _now_in_window(now_minutes, start, end)
 
     if start < end:
-        # Same-day window: only meaningful if the schedule runs today.
-        return inside if applies(entry, now) else None
+        # Same-day window: lit only when now is inside it and the schedule
+        # runs today.
+        return inside and applies(entry, now)
 
     # Window wraps midnight.
+    yesterday = now - timedelta(days=1)
     if inside:
         # The head segment (now >= start) belongs to today; the tail segment
         # (now < end) belongs to the run that started yesterday.
         ref = now if now_minutes >= start else yesterday
         return True if applies(entry, ref) else None
-    # Outside the window entirely: an off vote only if the schedule runs on a
-    # day whose window touches now (tonight's head or this morning's tail).
-    if applies(entry, now) or applies(entry, yesterday):
-        return False
-    return None
+    # Outside the window entirely: this entry's lights are off right now no
+    # matter which day the window is keyed to.
+    return False
 
 
-def _timer_schedule_is_on(data: dict[str, Any], now: Any) -> bool | None:
+def _timer_schedule_is_on(data: dict[str, Any], now: datetime) -> bool | None:
     """Determine on/off from the device's timer schedule.
 
     In timer mode the device's persisted ``switchState`` stays ``2`` whether
@@ -249,18 +274,33 @@ def _build_solid_color_pixels(color_int: int) -> list[dict[str, Any]]:
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: TrimlightConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up one light entity per Trimlight device."""
-    coordinator: TrimlightCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        TrimlightLight(coordinator, device_id)
-        for device_id in coordinator.data
-    )
+    """Set up one light entity per Trimlight device.
+
+    Devices added to the account later are picked up from coordinator updates,
+    so a new controller appears without reloading the integration.
+    """
+    coordinator = entry.runtime_data
+    known_ids: set[str] = set()
+
+    def _add_new_devices() -> None:
+        new_ids = set(coordinator.data or {}) - known_ids
+        if new_ids:
+            known_ids.update(new_ids)
+            async_add_entities(
+                TrimlightLight(coordinator, device_id)
+                for device_id in sorted(new_ids)
+            )
+
+    _add_new_devices()
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_devices))
 
 
-class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
+class TrimlightLight(
+    CoordinatorEntity[TrimlightCoordinator], LightEntity, RestoreEntity
+):
     """Represents a single Trimlight device as a HA light entity.
 
     Capabilities:
@@ -285,6 +325,10 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         self._active_effect_name: str | None = None
         self._last_command_time: float = 0.0
         self._color_effect_id: int | None = None
+        # Serializes this entity's commands: the check-then-act on the cached
+        # color slot id would otherwise race when e.g. dragging the color
+        # wheel fires several service calls, creating duplicate effects.
+        self._command_lock = asyncio.Lock()
         # Defaults so HA's frontend renders the color picker on first load.
         self._attr_hs_color = (0.0, 0.0)
         self._attr_brightness = 255
@@ -293,6 +337,27 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         is_on = self._resolve_is_on(self.coordinator.data.get(device_id, {}))
         if is_on is not None:
             self._attr_is_on = is_on
+
+    async def async_added_to_hass(self) -> None:
+        """Restore command-derived state the API can't report back.
+
+        The device detail doesn't identify the running effect or the color
+        the user last picked, so without restoring them every HA restart
+        would blank the effect and reset the color slot to white.
+        """
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None:
+            return
+        effect = last.attributes.get(ATTR_EFFECT)
+        if effect:
+            self._active_effect_name = effect
+        hs_color = last.attributes.get(ATTR_HS_COLOR)
+        if isinstance(hs_color, (list, tuple)) and len(hs_color) == 2:
+            self._attr_hs_color = (float(hs_color[0]), float(hs_color[1]))
+        brightness = last.attributes.get(ATTR_BRIGHTNESS)
+        if isinstance(brightness, (int, float)):
+            self._attr_brightness = int(brightness)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -335,6 +400,31 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                 return scheduled
         return True
 
+    def _state_snapshot(self) -> tuple[Any, ...]:
+        """Capture the optimistic-state fields for rollback on failure."""
+        return (
+            self._attr_is_on,
+            self._attr_hs_color,
+            self._attr_brightness,
+            self._active_effect_name,
+        )
+
+    def _restore_snapshot(self, snapshot: tuple[Any, ...]) -> None:
+        """Roll back a failed command's optimistic write.
+
+        Also drops the command cooldown so the next poll re-syncs immediately
+        — the command may have partially applied (e.g. power-on succeeded but
+        the effect activation failed).
+        """
+        (
+            self._attr_is_on,
+            self._attr_hs_color,
+            self._attr_brightness,
+            self._active_effect_name,
+        ) = snapshot
+        self._last_command_time = 0.0
+        self.async_write_ha_state()
+
     # ------------------------------------------------------------------ #
     # HA entity properties                                                 #
     # ------------------------------------------------------------------ #
@@ -352,15 +442,31 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
     @property
     def available(self) -> bool:
-        """Return True if the device is online."""
-        return self._data.get("connectivity", 0) == 1
+        """Return True if polling works and the device is online.
+
+        ``super().available`` carries coordinator.last_update_success, so a
+        cloud outage marks the entity unavailable instead of leaving it
+        "available" with frozen state (which the README explicitly promises
+        not to do).
+        """
+        return super().available and self._data.get("connectivity", 0) == 1
 
     def _handle_coordinator_update(self) -> None:
         """Sync state from coordinator, respecting the optimistic cooldown."""
         if time.monotonic() - self._last_command_time > _COMMAND_COOLDOWN:
-            is_on = self._resolve_is_on(self._data)
+            data = self._data
+            is_on = self._resolve_is_on(data)
             if is_on is not None:
                 self._attr_is_on = is_on
+            # Brightness is the one command-set attribute the device reports
+            # back (on currentEffect), so changes made in the Trimlight app
+            # flow into HA. Skip stale carried-forward detail.
+            if not data.get("_detail_stale"):
+                current = data.get("currentEffect")
+                if isinstance(current, dict) and isinstance(
+                    current.get("brightness"), int
+                ):
+                    self._attr_brightness = current["brightness"]
         self.async_write_ha_state()
 
     @property
@@ -384,7 +490,13 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
           - Plain toggle:   powers on; the device resumes its previous effect
           - ATTR_EFFECT:    activates the named saved effect
           - ATTR_HS_COLOR:  saves a solid static color effect then activates it
-          - ATTR_BRIGHTNESS: updates the brightness of the current color effect
+          - ATTR_BRIGHTNESS: re-saves whatever is showing (named effect or the
+            color slot) with the new brightness — it never replaces a running
+            effect with a solid color
+
+        Raises HomeAssistantError when the cloud command fails, after rolling
+        back the optimistic state, so the failure is visible in the UI instead
+        of being silently swallowed.
         """
         effect_name: str | None = kwargs.get(ATTR_EFFECT)
         hs_color: tuple[float, float] | None = kwargs.get(ATTR_HS_COLOR)
@@ -392,77 +504,141 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
 
         _LOGGER.debug("turn_on on %s — kwargs: %s", self._device_id, kwargs)
 
-        # view_effect/save_effect activate an effect but never touch the
-        # device's persisted switchState, so a fresh power-on must set it to
-        # MANUAL explicitly. Without it the shadow keeps reporting OFF and the
-        # entity flips back to off once the optimistic cooldown expires.
-        # Captured before the optimistic flag below overwrites it.
-        needs_power_on = not self._attr_is_on
-
-        # Optimistic update — holds for _COMMAND_COOLDOWN seconds.
-        self._last_command_time = time.monotonic()
-        self._attr_is_on = True
-        if hs_color:
-            self._attr_hs_color = hs_color
-        if brightness is not None:
-            self._attr_brightness = brightness
-        self.async_write_ha_state()
-
-        # Power on first when needed: setting switchState=MANUAL makes the
-        # device resume its persisted effect, which would otherwise override an
-        # effect/color activated beforehand.
+        # Validate before the optimistic write so a bad effect name fails the
+        # service call without flipping the entity on.
+        effect: dict[str, Any] | None = None
         if effect_name is not None:
-            if needs_power_on:
-                await self._power_on()
-            await self._activate_effect(effect_name)
-        elif hs_color is not None or brightness is not None:
-            if needs_power_on:
-                await self._power_on()
-            await self._set_color(
-                hs_color if hs_color is not None else self._attr_hs_color,
-                brightness if brightness is not None else self._attr_brightness,
-            )
-        elif needs_power_on:
-            # Plain turn-on: powering on makes the device resume the effect it
-            # was last showing. Re-issuing MANUAL while already on would revert
-            # an effect activated via view_effect, so only do it when off.
-            await self._power_on()
+            effect = self._effect_by_name(effect_name)
+            if effect is None or effect.get("id") is None:
+                raise ServiceValidationError(
+                    f"Effect '{effect_name}' not found on device"
+                    f" {self._device_id}"
+                )
+            if hs_color is not None:
+                _LOGGER.debug(
+                    "Ignoring hs_color on %s: effect '%s' takes precedence",
+                    self._device_id,
+                    effect_name,
+                )
 
-        # Republish state: the command helpers update _active_effect_name after
-        # the optimistic write above, so without this the effect shown in HA
-        # lags one selection behind until the next coordinator poll.
-        self.async_write_ha_state()
+        async with self._command_lock:
+            # view_effect/save_effect activate an effect but never touch the
+            # device's persisted switchState, so a fresh power-on must set it
+            # to MANUAL explicitly. Without it the shadow keeps reporting OFF
+            # and the entity flips back to off once the cooldown expires.
+            # Captured before the optimistic flag below overwrites it.
+            needs_power_on = not self._attr_is_on
+            snapshot = self._state_snapshot()
+
+            # Optimistic update — holds for _COMMAND_COOLDOWN seconds. Only
+            # the attributes the taken branch actually sends are written, so
+            # HA never shows values the device was never asked to apply.
+            self._last_command_time = time.monotonic()
+            self._attr_is_on = True
+            if brightness is not None:
+                self._attr_brightness = brightness
+            if hs_color is not None and effect is None:
+                self._attr_hs_color = hs_color
+            self.async_write_ha_state()
+
+            try:
+                # Power on first when needed: setting switchState=MANUAL makes
+                # the device resume its persisted effect, which would otherwise
+                # override an effect/color activated beforehand.
+                if needs_power_on:
+                    await self._power_on()
+                if effect is not None:
+                    await self._activate_effect(effect, brightness)
+                elif hs_color is not None:
+                    await self._set_color(
+                        hs_color,
+                        brightness
+                        if brightness is not None
+                        else self._attr_brightness,
+                    )
+                elif brightness is not None:
+                    await self._apply_brightness(brightness)
+            except TrimlightApiError as err:
+                self._restore_snapshot(snapshot)
+                raise HomeAssistantError(
+                    f"Failed to turn on {self.entity_id}: {err}"
+                ) from err
+
+            # Republish state: the command helpers update _active_effect_name
+            # after the optimistic write above, so without this the effect
+            # shown in HA lags one selection behind until the next poll.
+            self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off the light."""
-        self._last_command_time = time.monotonic()
-        self._attr_is_on = False
-        self.async_write_ha_state()
+        """Turn off the light.
 
-        try:
-            await self.coordinator.api.set_switch_state(
-                self._device_id, SWITCH_STATE_OFF
-            )
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to turn off %s", self._device_id)
+        Raises HomeAssistantError when the cloud command fails, after rolling
+        back the optimistic state.
+        """
+        async with self._command_lock:
+            snapshot = self._state_snapshot()
+            self._last_command_time = time.monotonic()
+            self._attr_is_on = False
+            self.async_write_ha_state()
+
+            try:
+                await self.coordinator.api.set_switch_state(
+                    self._device_id, SWITCH_STATE_OFF
+                )
+            except TrimlightApiError as err:
+                self._restore_snapshot(snapshot)
+                raise HomeAssistantError(
+                    f"Failed to turn off {self.entity_id}: {err}"
+                ) from err
 
     # ------------------------------------------------------------------ #
     # Internal command helpers                                             #
     # ------------------------------------------------------------------ #
 
-    async def _activate_effect(self, effect_name: str) -> None:
-        """Activate a named saved effect via view_effect."""
-        effect = self._effect_by_name(effect_name)
-        if effect is None:
-            _LOGGER.error(
-                "Effect '%s' not found on device %s", effect_name, self._device_id
+    async def _activate_effect(
+        self, effect: dict[str, Any], brightness: int | None = None
+    ) -> None:
+        """Activate a saved effect, optionally with a new brightness.
+
+        view_effect repaints the strip but can't change brightness, so a
+        brightness change re-saves the effect first. The save payload is
+        rebuilt from the known effect fields rather than echoing the whole
+        detail dict back at the API.
+        """
+        api = self.coordinator.api
+        effect_id = effect["id"]
+        if brightness is not None and effect.get("brightness") != brightness:
+            payload = {
+                key: effect[key]
+                for key in ("id", "name", "category", "mode", "speed", "pixels")
+                if key in effect
+            }
+            payload["brightness"] = brightness
+            result = await api.save_effect(self._device_id, payload)
+            effect_id = (result or {}).get("id", effect_id)
+        await api.view_effect(self._device_id, effect_id)
+        self._active_effect_name = effect.get("name")
+
+    async def _apply_brightness(self, brightness: int) -> None:
+        """Apply brightness to whatever the device is currently showing.
+
+        A running named effect is re-saved with the new brightness; only when
+        the color slot is (or is assumed to be) active does the brightness go
+        through the solid-color path. The running effect must never be
+        replaced by a solid color just because the brightness slider moved.
+        """
+        name = self._active_effect_name
+        if name is not None and name != HA_COLOR_EFFECT_NAME:
+            effect = self._effect_by_name(name)
+            if effect is not None and effect.get("id") is not None:
+                await self._activate_effect(effect, brightness)
+                return
+            _LOGGER.debug(
+                "Active effect '%s' not found on %s; using the color slot",
+                name,
+                self._device_id,
             )
-            return
-        try:
-            await self.coordinator.api.view_effect(self._device_id, effect["id"])
-            self._active_effect_name = effect_name
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to activate effect on %s", self._device_id)
+        await self._set_color(self._attr_hs_color or (0.0, 0.0), brightness)
 
     async def _set_color(
         self, hs: tuple[float, float], brightness: int
@@ -475,10 +651,12 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         # Reuse cached "HA Color" slot or find it in the effects list.
         if self._color_effect_id is None:
             existing = self._effect_by_name(HA_COLOR_EFFECT_NAME)
-            if existing:
+            if existing and existing.get("id") is not None:
                 self._color_effect_id = existing["id"]
 
-        effect_id = self._color_effect_id if self._color_effect_id is not None else -1
+        effect_id = (
+            self._color_effect_id if self._color_effect_id is not None else -1
+        )
 
         try:
             result = await api.save_effect(
@@ -493,26 +671,30 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
                     "pixels": pixels,
                 },
             )
-            saved_id = (result or {}).get("id", effect_id)
-            if not saved_id or saved_id == -1:
-                _LOGGER.error("save_effect returned invalid id: %s", saved_id)
-                return
-
-            self._color_effect_id = saved_id
-
-            # Always re-activate the slot after saving. Re-saving the
-            # "HA Color" effect updates the stored values but does not make the
-            # controller repaint the running pattern — only view_effect does.
-            # Skipping it meant same-slot changes (e.g. red -> blue) were
-            # silently ignored on the device while HA state showed the new color.
-            await api.view_effect(self._device_id, saved_id)
-            self._active_effect_name = HA_COLOR_EFFECT_NAME
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to set color on %s", self._device_id)
+        except TrimlightApiError:
             # The cached slot may be stale (e.g. the effect was deleted in
             # the Trimlight app). Drop it so the next attempt re-resolves
             # by name or creates a new slot instead of failing forever.
             self._color_effect_id = None
+            raise
+
+        saved_id = (result or {}).get("id", effect_id)
+        if saved_id is None or saved_id == -1:
+            # id 0 is accepted: only a missing id or the create sentinel is
+            # invalid.
+            raise TrimlightApiError(
+                f"save_effect returned invalid id: {saved_id}"
+            )
+        self._color_effect_id = saved_id
+
+        # Always re-activate the slot after saving. Re-saving the "HA Color"
+        # effect updates the stored values but does not make the controller
+        # repaint the running pattern — only view_effect does. The slot id
+        # stays cached if this view fails: the successful save just proved
+        # the slot is valid.
+        await api.view_effect(self._device_id, saved_id)
+        self._active_effect_name = HA_COLOR_EFFECT_NAME
+        self._attr_hs_color = hs
 
     async def _power_on(self) -> None:
         """Power the device on (manual mode).
@@ -523,9 +705,6 @@ class TrimlightLight(CoordinatorEntity[TrimlightCoordinator], LightEntity):
         device resume the effect it was last showing, which is the desired
         behaviour for a plain on/off toggle.
         """
-        try:
-            await self.coordinator.api.set_switch_state(
-                self._device_id, SWITCH_STATE_MANUAL
-            )
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception("Failed to power on %s", self._device_id)
+        await self.coordinator.api.set_switch_state(
+            self._device_id, SWITCH_STATE_MANUAL
+        )

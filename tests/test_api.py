@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from custom_components.trimlight.api import TrimlightApi, TrimlightApiError
+from custom_components.trimlight.api import (
+    TrimlightApi,
+    TrimlightApiError,
+    TrimlightAuthError,
+)
 
 
 def _mock_response(json_value):
@@ -20,11 +24,15 @@ def _mock_response(json_value):
     return resp
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, name="sleep_mock")
 def _no_sleep():
-    """Make retry backoff and rate-limit delays instant during tests."""
-    with patch("custom_components.trimlight.api.asyncio.sleep", AsyncMock()):
-        yield
+    """Make retry backoff and rate-limit delays instant during tests.
+
+    Yields the mock so tests can assert on the delays that would have been
+    slept — otherwise the backoff/spacing logic would be entirely unverified.
+    """
+    with patch("custom_components.trimlight.api.asyncio.sleep", AsyncMock()) as mock:
+        yield mock
 
 
 @pytest.fixture
@@ -137,7 +145,7 @@ class TestRequest:
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio
-    async def test_retries_transient_5xx_then_succeeds(self, api):
+    async def test_retries_transient_5xx_then_succeeds(self, api, sleep_mock):
         """A transient 502 should be retried and recover within the same call."""
         bad = _mock_response(None)
         bad.raise_for_status = MagicMock(
@@ -151,9 +159,12 @@ class TestRequest:
         result = await api._request("GET", "/some/path")
         assert result == {"ok": True}
         assert api._session.request.call_count == 2
+        # The one retry waited out the base backoff.
+        slept = [c.args[0] for c in sleep_mock.await_args_list]
+        assert 0.5 in slept
 
     @pytest.mark.asyncio
-    async def test_retries_exhausted_raises(self, api):
+    async def test_retries_exhausted_raises(self, api, sleep_mock):
         """Persistent transient errors raise after the attempt budget is spent."""
         bad = _mock_response(None)
         bad.raise_for_status = MagicMock(
@@ -166,6 +177,26 @@ class TestRequest:
         with pytest.raises(TrimlightApiError):
             await api._request("GET", "/some/path")
         assert api._session.request.call_count == 3
+        # Exponential backoff between the three attempts: 0.5s then 1.0s,
+        # and no backoff after the final failure.
+        slept = [c.args[0] for c in sleep_mock.await_args_list]
+        assert slept.count(0.5) == 1
+        assert slept.count(1.0) == 1
+        assert 2.0 not in slept
+
+    @pytest.mark.asyncio
+    async def test_requests_are_rate_limit_spaced(self, api, sleep_mock):
+        """Back-to-back requests must wait out the minimum spacing."""
+        good = _mock_response({"code": 0, "payload": {}})
+        api._session.request = AsyncMock(return_value=good)
+
+        await api._request("GET", "/some/path")
+        await api._request("GET", "/some/path")
+
+        # The second request starts within the min interval of the first, so
+        # it sleeps out the remainder (something in (0, 0.3]).
+        spacing = [c.args[0] for c in sleep_mock.await_args_list if 0 < c.args[0] <= 0.3]
+        assert spacing
 
     @pytest.mark.asyncio
     async def test_does_not_retry_client_4xx(self, api):
@@ -198,6 +229,15 @@ class TestRequest:
         api._session.request = AsyncMock(return_value=mock_resp)
 
         with pytest.raises(TrimlightApiError, match="Unexpected response"):
+            await api._request("GET", "/some/path")
+
+    @pytest.mark.asyncio
+    async def test_auth_error_code_raises_auth_error(self, api):
+        """A credential-rejection code raises the auth subclass for reauth."""
+        mock_resp = _mock_response({"code": 10001, "desc": "auth error"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(TrimlightAuthError, match="10001"):
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio
@@ -288,6 +328,14 @@ class TestNotifyUpdateShadow:
         # Should not raise.
         await api.notify_update_shadow("device_123")
 
+    @pytest.mark.asyncio
+    async def test_best_effort_call_is_not_retried(self, api):
+        """The discarded shadow notify must not run the retry ladder."""
+        api._session.request = AsyncMock(side_effect=TimeoutError())
+
+        await api.notify_update_shadow("device_123")
+        assert api._session.request.call_count == 1
+
 
 class TestSaveEffect:
     """Tests for the save_effect method."""
@@ -299,3 +347,22 @@ class TestSaveEffect:
 
         result = await api.save_effect("device_123", {"id": -1, "name": "Test"})
         assert result == {"id": 42}
+
+    @pytest.mark.asyncio
+    async def test_create_is_not_retried_on_timeout(self, api):
+        """A timed-out create may have landed server-side; retrying it would
+        leave a duplicate effect on the device."""
+        api._session.request = AsyncMock(side_effect=TimeoutError())
+
+        with pytest.raises(TrimlightApiError):
+            await api.save_effect("device_123", {"id": -1, "name": "Test"})
+        assert api._session.request.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_update_keeps_retry_policy(self, api):
+        """Updating an existing effect id is idempotent and stays retried."""
+        api._session.request = AsyncMock(side_effect=TimeoutError())
+
+        with pytest.raises(TrimlightApiError):
+            await api.save_effect("device_123", {"id": 5, "name": "Test"})
+        assert api._session.request.call_count == 3
