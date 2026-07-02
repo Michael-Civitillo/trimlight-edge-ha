@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Changing brightness no longer replaces the running effect with a solid color — the running effect is re-saved with the new brightness instead. Brightness combined with an effect in one call now applies to that effect.
+- Failed on/off/effect/color commands now surface as errors in Home Assistant instead of reporting success while the lights stay unchanged, and the optimistic state is rolled back so HA doesn't show a wrong state for a minute afterwards. Selecting an effect that doesn't exist on the device fails the service call instead of being logged and ignored.
+- Lights now show as unavailable when the Trimlight cloud can't be reached (as the README always promised) instead of staying "available" with frozen state.
+- Weekday/weekend timer schedules no longer report the light as on for the whole non-scheduled day (e.g. all Saturday for a weekdays-only schedule); the same applies to calendar events outside their date range.
+- Rapid color changes no longer race to create duplicate "HA Color" effects on the controller: each light's commands are serialized, a failed activation no longer discards the known-good color slot, and a timed-out effect *create* is not retried (the retry could land twice).
+- The effect, color, and brightness shown in HA survive a restart, and brightness changes made in the Trimlight app now flow back into HA.
+- Devices added to the Trimlight account appear in HA on the next poll — no reload needed.
+- Rejected API credentials now trigger Home Assistant's re-authentication flow instead of failing silently forever.
+- Malformed API payloads (a device without an id, an empty detail response) no longer fail the whole update cycle, and schedule times with out-of-range values are rejected instead of silently wrapped into a wrong window.
+- An effect id of 0 from the API is no longer treated as invalid.
+
+### Changed
+- The Client Secret field in the setup form is now a password input.
+- Polling skips the detail fetch for offline devices, and the best-effort shadow notify is no longer retried, keeping the poll cycle short when devices or the cloud misbehave.
+- Now requires Home Assistant 2024.8 or newer.
+
+### Internal
+- The coordinator lives on `entry.runtime_data` and receives the config entry; the light platform declares `PARALLEL_UPDATES`.
+- Test dependencies are pinned for reproducible CI; added a ruff configuration and CI lint job; workflows run with least-privilege permissions; releases are gated on the test suite and their notes contain only the released version's changelog section.
+
 ## [1.1.6] - 2026-06-27
 
 ### Fixed
