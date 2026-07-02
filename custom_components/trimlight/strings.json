@@ -8,14 +8,24 @@
           "client_id": "Client ID",
           "client_secret": "Client Secret"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Trimlight Edge",
+        "description": "Trimlight rejected the stored credentials for Client ID {client_id}. Enter the current Client Secret.",
+        "data": {
+          "client_secret": "Client Secret"
+        }
       }
     },
     "error": {
       "cannot_connect": "Unable to connect. Verify your Client ID and Client Secret.",
+      "invalid_auth": "Trimlight rejected these credentials. Verify your Client ID and Client Secret.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This Trimlight account is already configured."
+      "already_configured": "This Trimlight account is already configured.",
+      "reauth_successful": "Re-authentication was successful.",
+      "reauth_failed": "The configuration entry to re-authenticate no longer exists."
     }
   }
 }

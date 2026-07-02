@@ -1,13 +1,18 @@
 """Tests for the Trimlight light entity."""
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_EFFECT, ATTR_HS_COLOR
-from homeassistant.const import STATE_OFF, STATE_ON
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.core import State
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    mock_restore_cache,
+)
 
 from custom_components.trimlight.api import TrimlightApiError
 from custom_components.trimlight.const import DOMAIN, HA_COLOR_EFFECT_NAME
@@ -88,7 +93,7 @@ async def _setup_integration(hass, mock_api, *, coordinator_data=None, entry_id=
         entry.add_to_hass(hass)
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
-        return hass.data[DOMAIN][entry_id]
+        return entry.runtime_data
 
 
 def _entity_id() -> str:
@@ -130,6 +135,11 @@ def test_time_to_minutes_parses_variants():
     assert _time_to_minutes({"hours": 0, "minutes": 0}) == 0
     assert _time_to_minutes(None) is None
     assert _time_to_minutes({"hours": 9}) is None
+    # Out-of-range values are rejected instead of silently wrapped into a
+    # valid-looking window.
+    assert _time_to_minutes({"hours": 25, "minutes": 0}) is None
+    assert _time_to_minutes({"hours": 10, "minutes": 75}) is None
+    assert _time_to_minutes({"hours": -1, "minutes": 0}) is None
 
 
 def test_now_in_window_same_day():
@@ -184,14 +194,16 @@ def test_timer_schedule_weekdays_repetition():
     data = {"daily": [_daily_entry((18, 0), (23, 0), repetition=2)]}
     # Monday 20:00 is inside the window on a week day.
     assert _timer_schedule_is_on(data, _MONDAY) is True
-    # Saturday 20:00: schedule doesn't run on weekends -> no window -> unknown.
-    assert _timer_schedule_is_on(data, _SATURDAY) is None
+    # Saturday 20:00: a same-day weekdays schedule positively doesn't run on
+    # weekends, so the lights are off — not indeterminate (which would have
+    # shown the light as on all weekend).
+    assert _timer_schedule_is_on(data, _SATURDAY) is False
 
 
 def test_timer_schedule_weekend_repetition():
     data = {"daily": [_daily_entry((18, 0), (23, 0), repetition=3)]}
     assert _timer_schedule_is_on(data, _SATURDAY) is True
-    assert _timer_schedule_is_on(data, _MONDAY) is None
+    assert _timer_schedule_is_on(data, _MONDAY) is False
 
 
 def test_timer_schedule_calendar_event_in_window():
@@ -202,8 +214,9 @@ def test_timer_schedule_calendar_event_in_window():
     assert _timer_schedule_is_on(data, datetime(2026, 12, 25, 18, 0)) is True
     # Same calendar date but outside the daily time window -> off.
     assert _timer_schedule_is_on(data, datetime(2026, 12, 25, 2, 0)) is False
-    # Outside the date range entirely -> no window -> unknown.
-    assert _timer_schedule_is_on(data, datetime(2026, 12, 20, 18, 0)) is None
+    # Outside the date range entirely: the event positively isn't running, so
+    # a same-day window reports off rather than indeterminate.
+    assert _timer_schedule_is_on(data, datetime(2026, 12, 20, 18, 0)) is False
 
 
 def test_timer_schedule_calendar_wraps_year_end():
@@ -554,14 +567,16 @@ async def test_color_recovers_after_stale_effect_id(hass, mock_api):
     )
     assert mock_api.save_effect.call_args[0][1]["id"] == -1
 
-    # Slot deleted on the device — save with the cached id now fails.
+    # Slot deleted on the device — save with the cached id now fails, which
+    # surfaces to the caller instead of reporting a silent success.
     mock_api.save_effect.side_effect = TrimlightApiError("effect not found")
-    await hass.services.async_call(
-        "light",
-        "turn_on",
-        {"entity_id": _entity_id(), ATTR_HS_COLOR: (120.0, 100.0)},
-        blocking=True,
-    )
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": _entity_id(), ATTR_HS_COLOR: (120.0, 100.0)},
+            blocking=True,
+        )
     assert mock_api.save_effect.call_args[0][1]["id"] == 99
 
     # Next attempt should create a new slot and activate it.
@@ -576,3 +591,187 @@ async def test_color_recovers_after_stale_effect_id(hass, mock_api):
     )
     assert mock_api.save_effect.call_args[0][1]["id"] == -1
     mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 123)
+
+
+# --------------------------------------------------------------------------- #
+# Command failure handling, brightness routing, availability, late devices    #
+# --------------------------------------------------------------------------- #
+
+
+async def test_turn_off_failure_raises_and_reverts(hass, mock_api):
+    """A failed turn_off must raise instead of reporting silent success.
+
+    The optimistic OFF is rolled back so HA keeps showing the true state
+    instead of lying for the length of the command cooldown.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_off_fail",
+        unique_id="test_client_id_off_fail",
+    )
+    mock_api.set_switch_state.side_effect = TrimlightApiError("cloud down")
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light", "turn_off", {"entity_id": _entity_id()}, blocking=True
+        )
+    assert hass.states.get(_entity_id()).state == STATE_ON
+
+
+async def test_turn_on_failure_raises_and_reverts(hass, mock_api):
+    """A failed power-on must raise and roll the optimistic ON back."""
+    off_data = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "switchState": 0}
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=off_data,
+        entry_id="test_entry_on_fail",
+        unique_id="test_client_id_on_fail",
+    )
+    mock_api.set_switch_state.side_effect = TrimlightApiError("cloud down")
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light", "turn_on", {"entity_id": _entity_id()}, blocking=True
+        )
+    assert hass.states.get(_entity_id()).state == STATE_OFF
+
+
+async def test_unknown_effect_raises_validation_error(hass, mock_api):
+    """Activating a nonexistent effect fails the service call up front."""
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_bad_effect",
+        unique_id="test_client_id_bad_effect",
+    )
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": _entity_id(), ATTR_EFFECT: "DOES NOT EXIST"},
+            blocking=True,
+        )
+    mock_api.view_effect.assert_not_called()
+    mock_api.set_switch_state.assert_not_called()
+
+
+async def test_brightness_only_preserves_running_effect(hass, mock_api):
+    """The brightness slider must not replace a running effect with a color.
+
+    Regression test: a brightness-only turn_on used to fall into the color
+    branch and overwrite the active saved effect with a solid 'HA Color'
+    effect (white, on a fresh entity).
+    """
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_bri_effect",
+        unique_id="test_client_id_bri_effect",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "NEW YEAR"},
+        blocking=True,
+    )
+    mock_api.save_effect.reset_mock()
+    mock_api.view_effect.reset_mock()
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_BRIGHTNESS: 100},
+        blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["name"] == "NEW YEAR"
+    assert payload["brightness"] == 100
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get("effect") == "NEW YEAR"
+    assert state.attributes.get("brightness") == 100
+
+
+async def test_turn_on_effect_with_brightness_applies_both(hass, mock_api):
+    """Effect + brightness in one call applies the brightness to that effect."""
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_effect_bri",
+        unique_id="test_client_id_effect_bri",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": _entity_id(),
+            ATTR_EFFECT: "INDEPENDENCE DAY",
+            ATTR_BRIGHTNESS: 42,
+        },
+        blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["name"] == "INDEPENDENCE DAY"
+    assert payload["brightness"] == 42
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get("effect") == "INDEPENDENCE DAY"
+    assert state.attributes.get("brightness") == 42
+
+
+async def test_unavailable_when_cloud_update_fails(hass, mock_api):
+    """A failing coordinator update must mark the entity unavailable."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_cloud_down",
+        unique_id="test_client_id_cloud_down",
+    )
+    assert hass.states.get(_entity_id()).state == STATE_ON
+
+    coordinator.last_update_success = False
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+    assert hass.states.get(_entity_id()).state == STATE_UNAVAILABLE
+
+
+async def test_new_device_added_after_setup(hass, mock_api):
+    """A device that appears in a later poll gets an entity without reload."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_late_device",
+        unique_id="test_client_id_late_device",
+    )
+    assert hass.states.get("light.back_yard") is None
+
+    new_device = {
+        **MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID],
+        "deviceId": "device_late",
+        "name": "Back Yard",
+    }
+    coordinator.async_set_updated_data(
+        {**coordinator.data, "device_late": new_device}
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("light.back_yard") is not None
+
+
+async def test_restores_state_after_restart(hass, mock_api):
+    """Effect, color, and brightness survive an HA restart via restore."""
+    mock_restore_cache(
+        hass,
+        [
+            State(
+                _entity_id(),
+                STATE_ON,
+                {
+                    ATTR_EFFECT: "NEW YEAR",
+                    ATTR_HS_COLOR: [120.0, 100.0],
+                    ATTR_BRIGHTNESS: 42,
+                },
+            )
+        ],
+    )
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_restore",
+        unique_id="test_client_id_restore",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 42
+    assert tuple(state.attributes.get(ATTR_HS_COLOR)) == (120.0, 100.0)

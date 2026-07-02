@@ -5,12 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from custom_components.trimlight.api import TrimlightApi
-from custom_components.trimlight.const import (
-    CONF_CLIENT_ID,
-    CONF_CLIENT_SECRET,
-    DOMAIN,
-    HA_COLOR_EFFECT_NAME,
-)
+from custom_components.trimlight.const import CONF_CLIENT_ID, CONF_CLIENT_SECRET
 
 MOCK_DEVICE_ID = "device_abc123"
 MOCK_DEVICE_NAME = "Front House"

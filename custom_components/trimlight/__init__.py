@@ -8,13 +8,17 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import TrimlightApi
-from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, DOMAIN
+from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET
 from .coordinator import TrimlightCoordinator
 
 PLATFORMS: list[Platform] = [Platform.LIGHT]
 
+type TrimlightConfigEntry = ConfigEntry[TrimlightCoordinator]
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: TrimlightConfigEntry
+) -> bool:
     """Set up Trimlight Edge from a config entry."""
     session = async_get_clientsession(hass)
     api = TrimlightApi(
@@ -23,19 +27,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session,
     )
 
-    coordinator = TrimlightCoordinator(hass, api)
+    coordinator = TrimlightCoordinator(hass, entry, api)
     # Verifies connectivity (Bronze quality rule): raises
     # ConfigEntryNotReady itself if the first refresh fails.
     await coordinator.async_config_entry_first_refresh()
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(
+    hass: HomeAssistant, entry: TrimlightConfigEntry
+) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-    return unload_ok
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
