@@ -57,6 +57,21 @@ _COMMAND_COOLDOWN = 60
 # Maximum pixel entries in a custom effect (API docs: index range [0, 29]).
 _MAX_PIXEL_ENTRIES = 30
 
+# Effect fields the effect/save endpoint takes, as the device reports them in
+# its effects list. A built-in effect is described by ``pixelLen``/``reverse``
+# and a custom effect by its ``pixels`` array; each kind carries only its own
+# set, so forwarding whichever keys are present re-saves either faithfully.
+_EFFECT_SAVE_KEYS = (
+    "id",
+    "name",
+    "category",
+    "mode",
+    "speed",
+    "pixelLen",
+    "reverse",
+    "pixels",
+)
+
 
 def _hs_to_api_color(hs: tuple[float, float]) -> int:
     """Convert HA hs_color (hue 0-360, sat 0-100) to API decimal RGB integer."""
@@ -603,15 +618,15 @@ class TrimlightLight(
         view_effect repaints the strip but can't change brightness, so a
         brightness change re-saves the effect first. The save payload is
         rebuilt from the known effect fields rather than echoing the whole
-        detail dict back at the API.
+        detail dict back at the API. Built-in effects must carry their
+        ``pixelLen``/``reverse`` the same way custom effects carry
+        ``pixels``: the cloud rejects a built-in save without ``pixelLen``.
         """
         api = self.coordinator.api
         effect_id = effect["id"]
         if brightness is not None and effect.get("brightness") != brightness:
             payload = {
-                key: effect[key]
-                for key in ("id", "name", "category", "mode", "speed", "pixels")
-                if key in effect
+                key: effect[key] for key in _EFFECT_SAVE_KEYS if key in effect
             }
             payload["brightness"] = brightness
             result = await api.save_effect(self._device_id, payload)

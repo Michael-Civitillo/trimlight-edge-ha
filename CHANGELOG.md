@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Selecting a built-in effect together with a brightness, or moving the brightness slider while a built-in effect is running, no longer fails with `API error 20000: The parameter [pixelLen] is required`. Re-saving the effect now forwards the built-in effect's `pixelLen` and `reverse` fields; previously only the `pixels` array of custom effects was sent, so the cloud rejected every built-in effect re-save and the requested effect and brightness never applied ([#18])
+
+### Thanks
+- [@CptSugarFree](https://github.com/CptSugarFree) for reporting the built-in effect brightness failure ([#18])
+
+[#18]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/18
+
 ## [1.2.0] - 2026-07-02
 
 ### Fixed
