@@ -709,9 +709,110 @@ async def test_turn_on_effect_with_brightness_applies_both(hass, mock_api):
     payload = mock_api.save_effect.call_args[0][1]
     assert payload["name"] == "INDEPENDENCE DAY"
     assert payload["brightness"] == 42
+    # A custom effect is re-saved with its pixel pattern intact.
+    expected_pixels = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]["effects"][1]["pixels"]
+    assert payload["pixels"] == expected_pixels
     state = hass.states.get(_entity_id())
     assert state.attributes.get("effect") == "INDEPENDENCE DAY"
     assert state.attributes.get("brightness") == 42
+
+
+# A built-in (category 1) effect as the device reports it: the pattern is
+# identified by ``mode`` and sized by ``pixelLen``/``reverse``. There is no
+# ``pixels`` array, unlike the custom (category 2) effects in the fixture.
+_BUILTIN_EFFECT = {
+    "id": 3,
+    "name": "Green Cyan Wave",
+    "category": 1,
+    "mode": 3,
+    "speed": 100,
+    "brightness": 255,
+    "pixelLen": 30,
+    "reverse": False,
+}
+
+
+def _with_builtin_effect():
+    """Coordinator data with a built-in effect saved alongside the custom ones."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    return {
+        MOCK_DEVICE_ID: {
+            **device,
+            "effects": [*device["effects"], _BUILTIN_EFFECT],
+        }
+    }
+
+
+async def test_builtin_effect_with_brightness_resaves_pixel_len(hass, mock_api):
+    """Re-saving a built-in effect must forward its pixelLen/reverse fields.
+
+    Regression test for #18: effect + brightness on a built-in effect failed
+    with "API error 20000: The parameter [pixelLen] is required" because the
+    save payload only forwarded ``pixels``, which built-in effects don't have.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_builtin_effect(),
+        entry_id="test_entry_builtin_bri",
+        unique_id="test_client_id_builtin_bri",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": _entity_id(),
+            ATTR_EFFECT: "Green Cyan Wave",
+            ATTR_BRIGHTNESS: 204,
+        },
+        blocking=True,
+    )
+    mock_api.save_effect.assert_called_once()
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload == {
+        "id": 3,
+        "name": "Green Cyan Wave",
+        "category": 1,
+        "mode": 3,
+        "speed": 100,
+        "pixelLen": 30,
+        "reverse": False,
+        "brightness": 204,
+    }
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 99)
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get("effect") == "Green Cyan Wave"
+    assert state.attributes.get("brightness") == 204
+
+
+async def test_brightness_only_on_builtin_effect_resaves_pixel_len(hass, mock_api):
+    """The brightness slider on a running built-in effect re-saves it intact."""
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_builtin_effect(),
+        entry_id="test_entry_builtin_slider",
+        unique_id="test_client_id_builtin_slider",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "Green Cyan Wave"},
+        blocking=True,
+    )
+    # Plain activation only views the effect; nothing to re-save yet.
+    mock_api.save_effect.assert_not_called()
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_BRIGHTNESS: 100},
+        blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["name"] == "Green Cyan Wave"
+    assert payload["brightness"] == 100
+    assert payload["pixelLen"] == 30
+    assert payload["reverse"] is False
+    assert "pixels" not in payload
 
 
 async def test_unavailable_when_cloud_update_fails(hass, mock_api):
