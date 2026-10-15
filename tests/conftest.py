@@ -33,11 +33,12 @@ MOCK_DEVICE_DETAIL = {
         {"id": 1, "start": 1, "end": 76},
         {"id": 2, "start": 77, "end": 92},
     ],
+    # Custom effects (category 1; built-in effects are category 0).
     "effects": [
         {
             "id": 1,
             "name": "NEW YEAR",
-            "category": 2,
+            "category": 1,
             "mode": 0,
             "speed": 127,
             "brightness": 255,
@@ -52,7 +53,7 @@ MOCK_DEVICE_DETAIL = {
         {
             "id": 2,
             "name": "INDEPENDENCE DAY",
-            "category": 2,
+            "category": 1,
             "mode": 0,
             "speed": 127,
             "brightness": 255,
@@ -68,7 +69,7 @@ MOCK_DEVICE_DETAIL = {
         },
     ],
     "currentEffect": {
-        "category": 2,
+        "category": 1,
         "mode": 0,
         "speed": 127,
         "brightness": 255,

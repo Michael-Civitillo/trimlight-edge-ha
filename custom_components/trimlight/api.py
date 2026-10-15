@@ -31,7 +31,16 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class TrimlightApiError(Exception):
-    """Raised when the Trimlight API returns a non-zero result code."""
+    """Raised when the Trimlight API returns a non-zero result code.
+
+    ``code`` carries the API result code when the failure came back from a
+    successful HTTP exchange, and is None for transport-level failures
+    (network errors, timeouts, HTTP errors, unparseable bodies).
+    """
+
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class TrimlightAuthError(TrimlightApiError):
@@ -156,11 +165,12 @@ class TrimlightApi:
         code = result.get("code")
         if code in API_AUTH_ERROR_CODES:
             raise TrimlightAuthError(
-                f"API auth error {code}: {result.get('desc', 'unknown')}"
+                f"API auth error {code}: {result.get('desc', 'unknown')}",
+                code=code,
             )
         if code != 0:
             raise TrimlightApiError(
-                f"API error {code}: {result.get('desc', 'unknown')}"
+                f"API error {code}: {result.get('desc', 'unknown')}", code=code
             )
         return result.get("payload")
 

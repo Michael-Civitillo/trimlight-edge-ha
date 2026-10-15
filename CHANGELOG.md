@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-10-15
+
+### Fixed
+- Picking a color no longer fails with `API error 12008: Effect category [2] does not exist`. The Trimlight cloud now only accepts category `0` (built-in) and `1` (custom) when saving an effect, so the "HA Color" effect is saved as category `1`; an existing "HA Color" slot is corrected the next time a color is picked. Re-saving a saved effect for a brightness change now derives the category from the effect itself (built-in effects carry `pixelLen`, custom ones `pixels`) instead of echoing whatever the device reported, so that path can't send a rejected value either ([#23])
+- When the Trimlight cloud can't parse what a controller has stored (`API error 12006: Device data could not be parsed`), Home Assistant now raises a repair issue for that device explaining what to check in the Trimlight app — users have traced this to duplicate or unusually named saved effects — instead of only logging "Could not fetch detail" while the effect list stays empty. The issue clears itself once the device's data loads again, and on/off keeps working meanwhile ([#22])
+- While a device's effect list has never loaded, picking a color or changing brightness now fails with a clear error instead of creating a new "HA Color" effect blind, which could leave duplicate effects on the controller — one of the things that breaks the cloud's parsing ([#22])
+
+### Thanks
+- [@cmwillett](https://github.com/cmwillett) for reporting the effect-category rejection and pinpointing the fix ([#23])
+- [@CptSugarFree](https://github.com/CptSugarFree) for reporting the unparseable device data failure ([#22])
+- [@trevornorcross](https://github.com/trevornorcross) and [@cmwillett](https://github.com/cmwillett) for tracing it to duplicate and oddly named effects ([#22])
+
+[#22]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/22
+[#23]: https://github.com/Michael-Civitillo/trimlight-edge-ha/issues/23
+
 ## [1.2.1] - 2026-09-03
 
 ### Fixed

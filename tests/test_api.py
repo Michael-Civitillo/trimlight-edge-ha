@@ -248,6 +248,37 @@ class TestRequest:
             await api._request("GET", "/some/path")
         assert api._last_request_time > 0.0
 
+    @pytest.mark.asyncio
+    async def test_api_error_carries_result_code(self, api):
+        """Callers can branch on the API result code without parsing the message."""
+        mock_resp = _mock_response(
+            {"code": 12006, "desc": "Device data could not be parsed."}
+        )
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(TrimlightApiError) as err:
+            await api._request("POST", "/v1/oauth/resources/device/get")
+        assert err.value.code == 12006
+        assert "12006" in str(err.value)
+
+    @pytest.mark.asyncio
+    async def test_auth_error_carries_result_code(self, api):
+        mock_resp = _mock_response({"code": 10001, "desc": "auth error"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(TrimlightAuthError) as err:
+            await api._request("GET", "/some/path")
+        assert err.value.code == 10001
+
+    @pytest.mark.asyncio
+    async def test_transport_error_has_no_result_code(self, api):
+        """Only an API result code populates ``code``; transport errors don't."""
+        api._session.request = AsyncMock(side_effect=aiohttp.ClientError("boom"))
+
+        with pytest.raises(TrimlightApiError) as err:
+            await api._request("GET", "/some/path")
+        assert err.value.code is None
+
 
 class TestCurrentDate:
     """Tests for the currentDate payload helper."""
