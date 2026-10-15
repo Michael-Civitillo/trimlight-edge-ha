@@ -29,6 +29,7 @@ from homeassistant.util import dt as dt_util
 from .api import TrimlightApiError
 from .const import (
     DOMAIN,
+    EFFECT_CATEGORY_BUILTIN,
     EFFECT_CATEGORY_CUSTOM,
     EFFECT_MODE_STATIC,
     HA_COLOR_EFFECT_NAME,
@@ -61,16 +62,38 @@ _MAX_PIXEL_ENTRIES = 30
 # its effects list. A built-in effect is described by ``pixelLen``/``reverse``
 # and a custom effect by its ``pixels`` array; each kind carries only its own
 # set, so forwarding whichever keys are present re-saves either faithfully.
+# ``category`` is deliberately not forwarded as reported: see
+# ``_effect_category``.
 _EFFECT_SAVE_KEYS = (
     "id",
     "name",
-    "category",
     "mode",
     "speed",
     "pixelLen",
     "reverse",
     "pixels",
 )
+
+
+def _effect_category(effect: dict[str, Any]) -> int | None:
+    """Return the category to send when re-saving an effect from the device.
+
+    The effect/save endpoint accepts only ``EFFECT_CATEGORY_BUILTIN`` and
+    ``EFFECT_CATEGORY_CUSTOM`` (error 12008 otherwise), but the ``category``
+    the device reports in its effects list hasn't always matched: custom
+    effects have been seen reported as 2, the numbering the API docs' own
+    examples use. The kind of effect is unambiguous from its shape — per the
+    docs (section 4.2) a built-in effect carries ``pixelLen``/``reverse`` and
+    a custom one its ``pixels`` array — so derive it from that, and only echo
+    the reported value when the shape doesn't settle it.
+    """
+    has_pixels = bool(effect.get("pixels"))
+    has_pixel_len = effect.get("pixelLen") is not None
+    if has_pixels and not has_pixel_len:
+        return EFFECT_CATEGORY_CUSTOM
+    if has_pixel_len and not has_pixels:
+        return EFFECT_CATEGORY_BUILTIN
+    return effect.get("category")
 
 
 def _hs_to_api_color(hs: tuple[float, float]) -> int:
@@ -621,6 +644,8 @@ class TrimlightLight(
         detail dict back at the API. Built-in effects must carry their
         ``pixelLen``/``reverse`` the same way custom effects carry
         ``pixels``: the cloud rejects a built-in save without ``pixelLen``.
+        The category is derived from that shape rather than echoed from the
+        device, which hasn't always reported the numbering the cloud accepts.
         """
         api = self.coordinator.api
         effect_id = effect["id"]
@@ -628,6 +653,9 @@ class TrimlightLight(
             payload = {
                 key: effect[key] for key in _EFFECT_SAVE_KEYS if key in effect
             }
+            category = _effect_category(effect)
+            if category is not None:
+                payload["category"] = category
             payload["brightness"] = brightness
             result = await api.save_effect(self._device_id, payload)
             effect_id = (result or {}).get("id", effect_id)
@@ -658,7 +686,14 @@ class TrimlightLight(
     async def _set_color(
         self, hs: tuple[float, float], brightness: int
     ) -> None:
-        """Save a solid-color effect on the device, then activate it."""
+        """Save a solid-color effect on the device, then activate it.
+
+        The "HA Color" slot is reused from the cached id, else looked up by
+        name in the device's effects list, else created — but never blind:
+        while the effects list has never loaded there's no telling whether a
+        slot already exists, and a duplicate would be worse than a failed
+        command (see the check below).
+        """
         api = self.coordinator.api
         color_int = _hs_to_api_color(hs)
         pixels = _build_solid_color_pixels(color_int)
@@ -672,6 +707,17 @@ class TrimlightLight(
         effect_id = (
             self._color_effect_id if self._color_effect_id is not None else -1
         )
+        if effect_id == -1 and "effects" not in self._data:
+            # The detail fetch has never succeeded for this device (e.g. the
+            # cloud can't parse its stored data), so there's no way to tell
+            # whether a color slot already exists. Creating one blind could
+            # leave duplicate effects on the controller, which users report
+            # is itself one of the things that breaks the cloud's parsing.
+            raise TrimlightApiError(
+                f"the effect list for device {self._device_id} has not loaded,"
+                f" so the '{HA_COLOR_EFFECT_NAME}' effect can't be created"
+                " safely"
+            )
 
         try:
             result = await api.save_effect(

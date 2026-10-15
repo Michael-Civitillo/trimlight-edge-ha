@@ -15,14 +15,25 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.trimlight.api import TrimlightApiError
-from custom_components.trimlight.const import DOMAIN, HA_COLOR_EFFECT_NAME
+from custom_components.trimlight.const import (
+    DOMAIN,
+    EFFECT_CATEGORY_BUILTIN,
+    EFFECT_CATEGORY_CUSTOM,
+    HA_COLOR_EFFECT_NAME,
+)
 from custom_components.trimlight.light import (
+    _effect_category,
     _now_in_window,
     _timer_schedule_is_on,
     _time_to_minutes,
 )
 
-from .conftest import MOCK_COORDINATOR_DATA, MOCK_DEVICE_ID, MOCK_DEVICE_NAME
+from .conftest import (
+    MOCK_COORDINATOR_DATA,
+    MOCK_DEVICE_ID,
+    MOCK_DEVICE_LIST,
+    MOCK_DEVICE_NAME,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -491,7 +502,9 @@ async def test_turn_on_with_color(hass, mock_api):
     save_args = mock_api.save_effect.call_args
     payload = save_args[0][1]
     assert payload["name"] == HA_COLOR_EFFECT_NAME
-    assert payload["category"] == 2
+    # Regression test for #23: the cloud accepts only 0 (built-in) and
+    # 1 (custom) and rejects the 2 that used to be sent with error 12008.
+    assert payload["category"] == EFFECT_CATEGORY_CUSTOM == 1
     assert payload["mode"] == 0
     assert payload["pixels"][0]["color"] == 16711680  # pure red
 
@@ -717,13 +730,13 @@ async def test_turn_on_effect_with_brightness_applies_both(hass, mock_api):
     assert state.attributes.get("brightness") == 42
 
 
-# A built-in (category 1) effect as the device reports it: the pattern is
+# A built-in (category 0) effect as the device reports it: the pattern is
 # identified by ``mode`` and sized by ``pixelLen``/``reverse``. There is no
-# ``pixels`` array, unlike the custom (category 2) effects in the fixture.
+# ``pixels`` array, unlike the custom (category 1) effects in the fixture.
 _BUILTIN_EFFECT = {
     "id": 3,
     "name": "Green Cyan Wave",
-    "category": 1,
+    "category": EFFECT_CATEGORY_BUILTIN,
     "mode": 3,
     "speed": 100,
     "brightness": 255,
@@ -771,7 +784,7 @@ async def test_builtin_effect_with_brightness_resaves_pixel_len(hass, mock_api):
     assert payload == {
         "id": 3,
         "name": "Green Cyan Wave",
-        "category": 1,
+        "category": EFFECT_CATEGORY_BUILTIN,
         "mode": 3,
         "speed": 100,
         "pixelLen": 30,
@@ -813,6 +826,159 @@ async def test_brightness_only_on_builtin_effect_resaves_pixel_len(hass, mock_ap
     assert payload["pixelLen"] == 30
     assert payload["reverse"] is False
     assert "pixels" not in payload
+
+
+def test_effect_category_derived_from_effect_shape():
+    """The save category comes from the effect's shape, not the reported number.
+
+    Regression test for #23: devices have reported custom effects as
+    category 2, which the cloud rejects on save (only 0 built-in / 1 custom
+    are valid), so re-saving such an effect for a brightness change failed.
+    """
+    custom = {"category": 2, "pixels": [{"index": 0, "count": 1, "color": 255}]}
+    builtin = {"category": 1, "pixelLen": 30, "reverse": False}
+    assert _effect_category(custom) == EFFECT_CATEGORY_CUSTOM
+    assert _effect_category(builtin) == EFFECT_CATEGORY_BUILTIN
+    # Already-correct numbering is left as is.
+    assert _effect_category({**custom, "category": 1}) == EFFECT_CATEGORY_CUSTOM
+    assert _effect_category({**builtin, "category": 0}) == EFFECT_CATEGORY_BUILTIN
+    # An ambiguous shape (both markers, or neither) falls back to what the
+    # device reported, and to nothing when it reported nothing.
+    assert _effect_category({"category": 7, "pixels": [{}], "pixelLen": 30}) == 7
+    assert _effect_category({"category": 1, "pixels": []}) == 1
+    assert _effect_category({"name": "bare"}) is None
+
+
+def _with_legacy_categories():
+    """Coordinator data whose effects use the old 1=built-in / 2=custom numbering."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    return {
+        MOCK_DEVICE_ID: {
+            **device,
+            "effects": [
+                {**device["effects"][1], "category": 2},
+                {**_BUILTIN_EFFECT, "category": 1},
+            ],
+        }
+    }
+
+
+async def test_resave_sends_category_the_cloud_accepts(hass, mock_api):
+    """Re-saving an effect for a brightness change never echoes a rejected category.
+
+    Regression test for #23: with the device reporting the old numbering, a
+    brightness change on a saved effect forwarded category 2 (custom) or
+    1 (built-in, which the cloud now reads as custom) and failed with 12008.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_legacy_categories(),
+        entry_id="test_entry_legacy_cat",
+        unique_id="test_client_id_legacy_cat",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": _entity_id(),
+            ATTR_EFFECT: "INDEPENDENCE DAY",
+            ATTR_BRIGHTNESS: 42,
+        },
+        blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["category"] == EFFECT_CATEGORY_CUSTOM
+    expected_pixels = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]["effects"][1]["pixels"]
+    assert payload["pixels"] == expected_pixels
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {
+            "entity_id": _entity_id(),
+            ATTR_EFFECT: "Green Cyan Wave",
+            ATTR_BRIGHTNESS: 42,
+        },
+        blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["category"] == EFFECT_CATEGORY_BUILTIN
+    assert payload["pixelLen"] == 30
+    assert "pixels" not in payload
+
+
+def _list_only_data():
+    """Coordinator data for a device whose detail fetch has never succeeded."""
+    return {MOCK_DEVICE_ID: dict(MOCK_DEVICE_LIST[0])}
+
+
+async def test_color_without_effect_list_does_not_create_a_slot(hass, mock_api):
+    """No "HA Color" effect is created blind while the effect list is unknown.
+
+    Regression test for #22: while the cloud can't parse the device's stored
+    data the detail never loads, so there's no telling whether a color slot
+    already exists. Creating one anyway could leave duplicate effects on the
+    controller, which users report is itself one of the things that breaks
+    the cloud's parsing, so the command fails cleanly instead.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_list_only_data(),
+        entry_id="test_entry_no_detail",
+        unique_id="test_client_id_no_detail",
+    )
+    with pytest.raises(HomeAssistantError, match="has not loaded"):
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": _entity_id(), ATTR_HS_COLOR: (0.0, 100.0)},
+            blocking=True,
+        )
+    # Brightness alone routes through the color slot on a fresh entity too.
+    with pytest.raises(HomeAssistantError, match="has not loaded"):
+        await hass.services.async_call(
+            "light",
+            "turn_on",
+            {"entity_id": _entity_id(), ATTR_BRIGHTNESS: 100},
+            blocking=True,
+        )
+    mock_api.save_effect.assert_not_called()
+    mock_api.view_effect.assert_not_called()
+    # The optimistic write was rolled back: HA doesn't claim a color applied.
+    state = hass.states.get(_entity_id())
+    assert state.state == STATE_ON
+    assert state.attributes.get(ATTR_EFFECT) is None
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 255
+
+
+async def test_color_with_known_slot_works_without_effect_list(hass, mock_api):
+    """A slot already resolved keeps working even if the detail stops loading."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_known_slot",
+        unique_id="test_client_id_known_slot",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (0.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == -1
+
+    coordinator.async_set_updated_data(_list_only_data())
+    await hass.async_block_till_done()
+    mock_api.save_effect.reset_mock()
+    mock_api.view_effect.reset_mock()
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (120.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == 99
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 99)
 
 
 async def test_unavailable_when_cloud_update_fails(hass, mock_api):

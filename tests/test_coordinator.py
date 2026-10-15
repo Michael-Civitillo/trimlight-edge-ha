@@ -1,10 +1,11 @@
 """Tests for the Trimlight coordinator."""
 
 import logging
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -15,7 +16,10 @@ from custom_components.trimlight.api import (
     TrimlightAuthError,
 )
 from custom_components.trimlight.const import DOMAIN
-from custom_components.trimlight.coordinator import TrimlightCoordinator
+from custom_components.trimlight.coordinator import (
+    TrimlightCoordinator,
+    unparseable_device_data_issue_id,
+)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -185,3 +189,120 @@ async def test_detail_failure_marks_data_stale(coordinator, api):
     coordinator.data = data
     data = await coordinator._async_update_data()
     assert "_detail_stale" not in data[DEVICE_ID]
+
+
+# --------------------------------------------------------------------------- #
+# Unparseable device data (API error 12006) -> repair issue                    #
+# --------------------------------------------------------------------------- #
+
+_UNPARSEABLE = TrimlightApiError(
+    "API error 12006: Device data could not be parsed. Please synchronize the"
+    " device and retry. (invalid recovered effect boundary, declared 14 and"
+    " candidate 13)",
+    code=12006,
+)
+
+
+def _issue(hass):
+    """Return the device's unparseable-data repair issue, if raised."""
+    return ir.async_get(hass).async_get_issue(
+        DOMAIN, unparseable_device_data_issue_id(DEVICE_ID)
+    )
+
+
+async def test_unparseable_detail_raises_repair_issue(hass, coordinator, api, caplog):
+    """Error 12006 on the detail fetch raises an actionable repair issue.
+
+    Regression test for #22: the cloud can't parse what the controller has
+    stored and only the user can fix that from the Trimlight app, so it must
+    show up in Settings > Repairs rather than only as a log line behind an
+    empty effect list.
+    """
+    api.get_device = AsyncMock(side_effect=_UNPARSEABLE)
+    with caplog.at_level(
+        logging.WARNING, logger="custom_components.trimlight.coordinator"
+    ):
+        data = await coordinator._async_update_data()
+
+    # The device stays usable for on/off from its list-level data.
+    assert data[DEVICE_ID]["name"] == "Front"
+    assert data[DEVICE_ID]["_detail_stale"] is True
+
+    issue = _issue(hass)
+    assert issue is not None
+    assert issue.severity == ir.IssueSeverity.WARNING
+    assert issue.is_fixable is False
+    assert issue.translation_key == "unparseable_device_data"
+    assert issue.translation_placeholders == {
+        "device_name": "Front",
+        "color_effect": "HA Color",
+    }
+    # The log line points at the repair issue instead of leaving the user to
+    # make sense of the raw API error.
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "12006" in warnings[0]
+    assert "Settings > Repairs" in warnings[0]
+
+
+async def test_unparseable_issue_clears_on_recovery(hass, coordinator, api):
+    """The repair issue goes away once the device's data loads again."""
+    api.get_device = AsyncMock(side_effect=_UNPARSEABLE)
+    coordinator.data = await coordinator._async_update_data()
+    assert _issue(hass) is not None
+
+    api.get_device = AsyncMock(return_value=dict(DETAIL))
+    data = await coordinator._async_update_data()
+    assert _issue(hass) is None
+    assert DEVICE_ID not in coordinator._detail_failures
+    assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
+
+
+async def test_unparseable_issue_raised_once_per_outage(hass, coordinator, api):
+    """Repeated 12006 polls don't keep re-creating the same issue."""
+    api.get_device = AsyncMock(side_effect=_UNPARSEABLE)
+    coordinator.data = await coordinator._async_update_data()
+    assert _issue(hass) is not None
+
+    with patch(
+        "custom_components.trimlight.coordinator.ir.async_create_issue"
+    ) as create_issue:
+        await coordinator._async_update_data()
+        await coordinator._async_update_data()
+    create_issue.assert_not_called()
+    assert _issue(hass) is not None
+
+
+async def test_other_detail_failures_raise_no_repair_issue(hass, coordinator, api):
+    """Only the unparseable-data error is something the user can act on."""
+    api.get_device = AsyncMock(
+        side_effect=TrimlightApiError("API error 10008: Device is offline", code=10008)
+    )
+    await coordinator._async_update_data()
+    assert _issue(hass) is None
+
+    api.get_device = AsyncMock(side_effect=TrimlightApiError("502 Bad Gateway"))
+    await coordinator._async_update_data()
+    assert _issue(hass) is None
+
+
+async def test_unparseable_issue_clears_when_device_removed(hass, coordinator, api):
+    """A device dropped from the account doesn't leave its issue dangling."""
+    api.get_device = AsyncMock(side_effect=_UNPARSEABLE)
+    coordinator.data = await coordinator._async_update_data()
+    assert _issue(hass) is not None
+
+    api.get_devices = AsyncMock(return_value=[])
+    await coordinator._async_update_data()
+    assert _issue(hass) is None
+    assert DEVICE_ID not in coordinator._detail_failures
+
+
+async def test_unparseable_issue_clears_on_shutdown(hass, coordinator, api):
+    """Unloading the entry clears its repair issues (a reload re-raises them)."""
+    api.get_device = AsyncMock(side_effect=_UNPARSEABLE)
+    coordinator.data = await coordinator._async_update_data()
+    assert _issue(hass) is not None
+
+    await coordinator.async_shutdown()
+    assert _issue(hass) is None

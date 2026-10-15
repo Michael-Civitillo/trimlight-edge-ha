@@ -27,5 +27,11 @@
       "reauth_successful": "Re-authentication was successful.",
       "reauth_failed": "The configuration entry to re-authenticate no longer exists."
     }
+  },
+  "issues": {
+    "unparseable_device_data": {
+      "title": "Trimlight cannot read the data stored on {device_name}",
+      "description": "The Trimlight cloud reports that it cannot parse the data stored on **{device_name}** (API error 12006), so Home Assistant cannot load its effect list, brightness, or timer schedule. Turning the light on and off still works.\n\nThis comes from what is saved on the controller, not from Home Assistant. Users have fixed it by opening the Trimlight app and checking the device's saved effects for duplicates (two effects with the same name) or names with unusual characters or trailing spaces, then renaming or deleting those effects and re-syncing the device. Deleting the **{color_effect}** effect is safe: Home Assistant recreates it the next time you pick a color.\n\nThis issue clears itself once the device's data loads again."
+    }
   }
 }

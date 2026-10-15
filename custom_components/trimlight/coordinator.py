@@ -9,12 +9,27 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import TrimlightApi, TrimlightApiError, TrimlightAuthError
-from .const import DOMAIN, UPDATE_INTERVAL
+from .const import (
+    API_UNPARSEABLE_DEVICE_DATA_CODE,
+    DOMAIN,
+    HA_COLOR_EFFECT_NAME,
+    UPDATE_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Translation key of the repair issue raised while the cloud can't parse a
+# device's stored data. The per-device issue id is this key plus the device id.
+UNPARSEABLE_DEVICE_DATA_ISSUE = "unparseable_device_data"
+
+
+def unparseable_device_data_issue_id(device_id: str) -> str:
+    """Return the repair issue id for a device whose stored data can't be parsed."""
+    return f"{UNPARSEABLE_DEVICE_DATA_ISSUE}_{device_id}"
 
 
 class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -39,6 +54,19 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Device IDs whose detail fetch is currently failing, so the warning is
         # logged once per outage rather than on every poll.
         self._detail_failures: set[str] = set()
+        # Device IDs with an "unparseable device data" repair issue raised, so
+        # it can be cleared again on recovery, device removal, or unload.
+        self._unparseable_issues: set[str] = set()
+
+    async def async_shutdown(self) -> None:
+        """Clear this entry's repair issues on unload.
+
+        A reload raises them again on its first refresh if the data is still
+        unparseable; removing the integration must not leave them dangling.
+        """
+        for device_id in list(self._unparseable_issues):
+            self._clear_unparseable_issue(device_id)
+        await super().async_shutdown()
 
     def _carry_forward(self, device: dict[str, Any], previous: dict[str, Any]) -> dict:
         """Merge fresh list-level fields over last-known detail, flagged stale.
@@ -53,6 +81,67 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             **device,
             "_detail_stale": True,
         }
+
+    def _handle_detail_failure(
+        self, device: dict[str, Any], err: TrimlightApiError
+    ) -> None:
+        """Record a failed detail fetch: warn once per outage, repair when actionable.
+
+        Error 12006 ("Device data could not be parsed") means the cloud can't
+        make sense of what the controller has stored; users have traced it to
+        duplicate or oddly named saved effects. Nothing here can fix that, but
+        the user can from the Trimlight app, so it's surfaced as a repair
+        issue instead of being left as a log line behind an empty effect list.
+        """
+        device_id: str = device["deviceId"]
+        unparseable = err.code == API_UNPARSEABLE_DEVICE_DATA_CODE
+
+        if device_id in self._detail_failures:
+            _LOGGER.debug(
+                "Still cannot fetch detail for device %s: %s", device_id, err
+            )
+        else:
+            self._detail_failures.add(device_id)
+            hint = ""
+            if unparseable:
+                hint = (
+                    " (Trimlight's cloud cannot parse this controller's stored"
+                    " data; see Settings > Repairs for what to check in the"
+                    " Trimlight app)"
+                )
+            _LOGGER.warning(
+                "Could not fetch detail for device %s: %s%s", device_id, err, hint
+            )
+
+        if unparseable and device_id not in self._unparseable_issues:
+            self._unparseable_issues.add(device_id)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                unparseable_device_data_issue_id(device_id),
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=UNPARSEABLE_DEVICE_DATA_ISSUE,
+                translation_placeholders={
+                    "device_name": device.get("name") or device_id,
+                    "color_effect": HA_COLOR_EFFECT_NAME,
+                },
+            )
+
+    def _handle_detail_recovered(self, device_id: str) -> None:
+        """Clear a device's outage bookkeeping once its detail fetch works again."""
+        if device_id in self._detail_failures:
+            self._detail_failures.discard(device_id)
+            _LOGGER.info("Device %s detail fetch recovered", device_id)
+        self._clear_unparseable_issue(device_id)
+
+    def _clear_unparseable_issue(self, device_id: str) -> None:
+        """Delete the device's repair issue, if one was raised."""
+        if device_id in self._unparseable_issues:
+            self._unparseable_issues.discard(device_id)
+            ir.async_delete_issue(
+                self.hass, DOMAIN, unparseable_device_data_issue_id(device_id)
+            )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the Trimlight API."""
@@ -100,22 +189,11 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     f"Trimlight rejected the API credentials: {err}"
                 ) from err
             except TrimlightApiError as err:
-                # Warn once per outage instead of on every 30s poll.
                 result[device_id] = self._carry_forward(device, previous)
-                if device_id not in self._detail_failures:
-                    self._detail_failures.add(device_id)
-                    _LOGGER.warning(
-                        "Could not fetch detail for device %s: %s", device_id, err
-                    )
-                else:
-                    _LOGGER.debug(
-                        "Still cannot fetch detail for device %s: %s", device_id, err
-                    )
+                self._handle_detail_failure(device, err)
                 continue
 
-            if device_id in self._detail_failures:
-                self._detail_failures.discard(device_id)
-                _LOGGER.info("Device %s detail fetch recovered", device_id)
+            self._handle_detail_recovered(device_id)
 
             merged = {**device, **detail}
             _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
@@ -127,5 +205,12 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 merged.get("calendar"),
             )
             result[device_id] = merged
+
+        # A device that dropped out of the account can't recover, so don't
+        # leave its outage bookkeeping (or repair issue) dangling.
+        listed = set(result)
+        for device_id in self._unparseable_issues - listed:
+            self._clear_unparseable_issue(device_id)
+        self._detail_failures &= listed
 
         return result
