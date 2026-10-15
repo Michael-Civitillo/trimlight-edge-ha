@@ -80,10 +80,11 @@ def _effect_category(effect: dict[str, Any]) -> int | None:
 
     The effect/save endpoint accepts only ``EFFECT_CATEGORY_BUILTIN`` and
     ``EFFECT_CATEGORY_CUSTOM`` (error 12008 otherwise), but the ``category``
-    the device reports in its effects list hasn't always used that numbering
-    (custom effects have been seen reported as 2). The kind of effect is
-    unambiguous from its shape — a built-in effect carries ``pixelLen``, a
-    custom one its ``pixels`` array — so derive it from that, and only echo
+    the device reports in its effects list hasn't always matched: custom
+    effects have been seen reported as 2, the numbering the API docs' own
+    examples use. The kind of effect is unambiguous from its shape — per the
+    docs (section 4.2) a built-in effect carries ``pixelLen``/``reverse`` and
+    a custom one its ``pixels`` array — so derive it from that, and only echo
     the reported value when the shape doesn't settle it.
     """
     has_pixels = bool(effect.get("pixels"))

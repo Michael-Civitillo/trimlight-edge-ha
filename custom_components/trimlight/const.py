@@ -45,10 +45,11 @@ API_RETRY_BASE_BACKOFF = 0.5  # seconds; doubled on each retry
 # Custom effect saved on the device for HA color picker control.
 HA_COLOR_EFFECT_NAME = "HA Color"
 
-# Effect categories the effect/save endpoint accepts. The cloud rejects any
-# other value with error 12008 ("Valid values: 0 (built-in effect),
-# 1 (custom effect)"); the 2 this integration used to send for custom
-# effects is no longer accepted.
+# Effect categories (API docs sections 4.2 and 12, "Effect fields details"):
+# 0 is a built-in effect, 1 a custom effect. The docs' request *examples*
+# show 1/2 instead, which is where the 2 this integration used to send came
+# from; the cloud now validates against the table and rejects anything else
+# with error 12008 ("Valid values: 0 (built-in effect), 1 (custom effect)").
 EFFECT_CATEGORY_BUILTIN = 0
 EFFECT_CATEGORY_CUSTOM = 1
 
