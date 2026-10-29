@@ -11,7 +11,7 @@
       },
       "reauth_confirm": {
         "title": "Re-authenticate Trimlight Edge",
-        "description": "Trimlight rejected the stored credentials for Client ID {client_id}. Enter the current Client Secret.",
+        "description": "Trimlight rejected the stored credentials for Client ID {client_id}. Enter the current Client Secret. If the secret has not changed, check that the Home Assistant host's clock is accurate before retrying: requests are signed with the current time.",
         "data": {
           "client_secret": "Client Secret"
         }
@@ -19,7 +19,7 @@
     },
     "error": {
       "cannot_connect": "Unable to connect. Verify your Client ID and Client Secret.",
-      "invalid_auth": "Trimlight rejected these credentials. Verify your Client ID and Client Secret.",
+      "invalid_auth": "Trimlight rejected these credentials. Verify your Client ID and Client Secret. If they are correct, check that the Home Assistant host's clock is accurate: requests are signed with the current time and rejected when it is off.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {

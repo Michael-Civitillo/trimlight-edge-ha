@@ -190,8 +190,8 @@ class TrimlightApi:
         """Return the current date/time dict the API expects.
 
         Uses Home Assistant's configured timezone rather than the host's:
-        the two often differ (e.g. UTC containers), and this value drives
-        the device clock and timer schedules.
+        the two often differ (e.g. UTC containers), and the device's timer
+        schedules are expressed in local time.
         """
         now = dt_util.now()
         # API weekday: SUNDAY=1 … SATURDAY=7; Python isoweekday: MON=1 … SUN=7

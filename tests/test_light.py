@@ -21,9 +21,11 @@ from custom_components.trimlight.const import (
     EFFECT_CATEGORY_CUSTOM,
     HA_COLOR_EFFECT_NAME,
 )
+from custom_components.trimlight import light as light_module
 from custom_components.trimlight.light import (
     _effect_category,
     _now_in_window,
+    _running_effect_name,
     _timer_schedule_is_on,
     _time_to_minutes,
 )
@@ -151,6 +153,26 @@ def test_time_to_minutes_parses_variants():
     assert _time_to_minutes({"hours": 25, "minutes": 0}) is None
     assert _time_to_minutes({"hours": 10, "minutes": 75}) is None
     assert _time_to_minutes({"hours": -1, "minutes": 0}) is None
+
+
+def test_time_to_minutes_reads_end_of_day_as_midnight():
+    """The API docs give hours as [1, 24] and minutes as [1, 60].
+
+    24:00 (and a carried 23:60) means midnight, which the window logic then
+    handles as a wrap; anything past it is still rejected.
+    """
+    assert _time_to_minutes({"hours": 24, "minutes": 0}) == 0
+    assert _time_to_minutes({"hours": 23, "minutes": 60}) == 0
+    assert _time_to_minutes({"hours": 10, "minutes": 60}) == 11 * 60
+    assert _time_to_minutes({"hours": 24, "minutes": 30}) is None
+
+
+def test_timer_schedule_window_ending_at_24_00():
+    """An 18:00 -> 24:00 window is on until midnight and off after it."""
+    daily = [_daily_entry((18, 0), (24, 0))]
+    assert _timer_schedule_is_on({"daily": daily}, datetime(2026, 6, 22, 23, 59)) is True
+    assert _timer_schedule_is_on({"daily": daily}, datetime(2026, 6, 23, 0, 0)) is False
+    assert _timer_schedule_is_on({"daily": daily}, datetime(2026, 6, 23, 12, 0)) is False
 
 
 def test_now_in_window_same_day():
@@ -1015,6 +1037,166 @@ async def test_new_device_added_after_setup(hass, mock_api):
     )
     await hass.async_block_till_done()
     assert hass.states.get("light.back_yard") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Running effect reported by the device                                       #
+# --------------------------------------------------------------------------- #
+
+
+def _with_current_effect(**fields):
+    """Build coordinator data with extra fields on the device's currentEffect."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    return {
+        MOCK_DEVICE_ID: {
+            **device,
+            "currentEffect": {**device["currentEffect"], **fields},
+        }
+    }
+
+
+def _cooldown_elapsed():
+    """Patch the light module's clock so the command cooldown has passed."""
+    return patch.object(
+        light_module, "time", MagicMock(monotonic=MagicMock(return_value=1e6))
+    )
+
+
+def test_running_effect_name_resolves_reported_id():
+    data = _with_current_effect(id=2)[MOCK_DEVICE_ID]
+    assert _running_effect_name(data) == "INDEPENDENCE DAY"
+
+
+@pytest.mark.parametrize(
+    "effect_id",
+    [-1, 42, None, True, "2"],
+    ids=["preview", "unknown", "null", "bool", "string"],
+)
+def test_running_effect_name_ignores_unusable_ids(effect_id):
+    """Only a non-negative integer id matching a named saved effect counts."""
+    data = _with_current_effect(id=effect_id)[MOCK_DEVICE_ID]
+    assert _running_effect_name(data) is None
+
+
+def test_running_effect_name_without_usable_data():
+    assert _running_effect_name({}) is None
+    # The docs' sample payload has no id at all.
+    assert _running_effect_name(MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]) is None
+    assert _running_effect_name({"currentEffect": {"id": 1}}) is None
+    assert (
+        _running_effect_name({"currentEffect": {"id": 1}, "effects": [{"id": 1}]})
+        is None
+    )
+
+
+async def test_effect_follows_device_reported_id_at_setup(hass, mock_api):
+    """A controller that reports the running effect's id names it from the start."""
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=2),
+        entry_id="test_entry_reported_effect",
+        unique_id="test_client_id_reported_effect",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_device_reported_effect_wins_over_restored(hass, mock_api):
+    """A restored effect name is only a fallback for controllers that report none."""
+    mock_restore_cache(
+        hass, [State(_entity_id(), STATE_ON, {ATTR_EFFECT: "NEW YEAR"})]
+    )
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=2),
+        entry_id="test_entry_reported_vs_restored",
+        unique_id="test_client_id_reported_vs_restored",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_effect_change_in_app_flows_into_ha(hass, mock_api):
+    """After the command cooldown, the effect the device reports replaces HA's."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=1),
+        entry_id="test_entry_app_effect",
+        unique_id="test_client_id_app_effect",
+    )
+    assert hass.states.get(_entity_id()).attributes.get(ATTR_EFFECT) == "NEW YEAR"
+
+    with _cooldown_elapsed():
+        coordinator.async_set_updated_data(_with_current_effect(id=2))
+        await hass.async_block_till_done()
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_preview_id_keeps_last_known_effect(hass, mock_api):
+    """An id of -1 (an unsaved preview is running) leaves the known effect alone."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=1),
+        entry_id="test_entry_preview_effect",
+        unique_id="test_client_id_preview_effect",
+    )
+    with _cooldown_elapsed():
+        coordinator.async_set_updated_data(_with_current_effect(id=-1))
+        await hass.async_block_till_done()
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+
+
+async def test_reported_effect_does_not_override_fresh_command(hass, mock_api):
+    """Within the cooldown a not-yet-updated poll must not undo a command."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=1),
+        entry_id="test_entry_effect_cooldown",
+        unique_id="test_client_id_effect_cooldown",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "INDEPENDENCE DAY"},
+        blocking=True,
+    )
+    coordinator.async_set_updated_data(_with_current_effect(id=1))
+    await hass.async_block_till_done()
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_stale_detail_does_not_change_effect(hass, mock_api):
+    """Carried-forward detail is last-known, so it must not rename the effect."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        coordinator_data=_with_current_effect(id=1),
+        entry_id="test_entry_effect_stale",
+        unique_id="test_client_id_effect_stale",
+    )
+    stale = _with_current_effect(id=2)
+    stale[MOCK_DEVICE_ID]["_detail_stale"] = True
+    with _cooldown_elapsed():
+        coordinator.async_set_updated_data(stale)
+        await hass.async_block_till_done()
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+
+
+async def test_app_brightness_flows_into_ha(hass, mock_api):
+    """Brightness changed in the Trimlight app is picked up after the cooldown."""
+    coordinator = await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_app_brightness",
+        unique_id="test_client_id_app_brightness",
+    )
+    with _cooldown_elapsed():
+        coordinator.async_set_updated_data(_with_current_effect(brightness=100))
+        await hass.async_block_till_done()
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 100
 
 
 async def test_restores_state_after_restart(hass, mock_api):

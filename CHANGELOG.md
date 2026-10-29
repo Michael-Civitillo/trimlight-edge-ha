@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A wrong Client Secret is now recognised as rejected credentials. Trimlight's result-code table lists `10002` ("Wrong password") alongside `10001`, but only `10001` triggered the re-authentication flow; a `10002` showed as "Unable to connect" during setup and was retried forever at runtime instead of asking for the new secret
+- The setup and re-authentication forms now explain that a wrong clock on the Home Assistant host is rejected the same way as bad credentials, since every request is signed with the current time
+- Timer-mode state no longer ignores a schedule window that ends at 24:00. The API documents schedule hours as 1 to 24 and minutes as 1 to 60, so 24:00 is now read as midnight instead of being dropped as out of range, which made that window fall back to "on" all day
+
+### Changed
+- Home Assistant now shows the effect the controller reports as running, so an effect picked in the Trimlight app appears in HA after the next poll. Trimlight's documentation describes the running effect's id in the device detail (it is `-1` while an unsaved preview runs); on controllers that don't report one, the behaviour is unchanged and the effect last set from HA is kept
+- Debug logging of each poll now includes the reported running effect and device time, for diagnosing timer-state and effect-name reports
+
 ## [1.2.2] - 2026-10-15
 
 ### Fixed

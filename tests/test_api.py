@@ -232,12 +232,21 @@ class TestRequest:
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio
-    async def test_auth_error_code_raises_auth_error(self, api):
-        """A credential-rejection code raises the auth subclass for reauth."""
-        mock_resp = _mock_response({"code": 10001, "desc": "auth error"})
+    @pytest.mark.parametrize(
+        ("code", "desc"),
+        [(10001, "error"), (10002, "wrong password")],
+        ids=["generic-error", "wrong-password"],
+    )
+    async def test_auth_error_code_raises_auth_error(self, api, code, desc):
+        """Both credential-rejection codes raise the auth subclass for reauth.
+
+        The API docs' result-code table lists 10001 ("Error") and 10002
+        ("Wrong password"); a wrong client secret comes back as the latter.
+        """
+        mock_resp = _mock_response({"code": code, "desc": desc})
         api._session.request = AsyncMock(return_value=mock_resp)
 
-        with pytest.raises(TrimlightAuthError, match="10001"):
+        with pytest.raises(TrimlightAuthError, match=str(code)):
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio

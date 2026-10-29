@@ -96,6 +96,35 @@ def _effect_category(effect: dict[str, Any]) -> int | None:
     return effect.get("category")
 
 
+def _running_effect_name(data: dict[str, Any]) -> str | None:
+    """Return the name of the saved effect the device reports as running.
+
+    ``currentEffect`` carries the running effect's parameters and, on
+    controllers that report it, the saved effect's ``id``: the API docs
+    (sections 4.1 and 4.2) say the id is -1 while an unsaved preview is
+    running. The docs' sample payload omits the field, so None is returned
+    whenever the id is missing, negative, or matches no named saved effect,
+    and the caller keeps whatever it already knows about the running effect.
+    """
+    current = data.get("currentEffect")
+    if not isinstance(current, dict):
+        return None
+    effect_id = current.get("id")
+    if (
+        isinstance(effect_id, bool)
+        or not isinstance(effect_id, int)
+        or effect_id < 0
+    ):
+        return None
+    effects = data.get("effects")
+    if not isinstance(effects, list):
+        return None
+    for effect in effects:
+        if isinstance(effect, dict) and effect.get("id") == effect_id:
+            return effect.get("name") or None
+    return None
+
+
 def _hs_to_api_color(hs: tuple[float, float]) -> int:
     """Convert HA hs_color (hue 0-360, sat 0-100) to API decimal RGB integer."""
     h, s = hs
@@ -108,9 +137,11 @@ def _time_to_minutes(obj: Any) -> int | None:
 
     Trimlight time objects use the same shape as the API ``currentDate``
     helper (``hours``/``minutes``). Older/alternate payloads may use
-    ``hour``/``minute``; both are accepted. Returns None for missing or
-    out-of-range values so the caller can fall back to mode-based state
-    instead of treating garbage as a real window.
+    ``hour``/``minute``; both are accepted. The API docs (section 4.6) give
+    the ranges as hours [1, 24] and minutes [1, 60], so 24:00 (or a carried
+    23:60) is read as midnight. Returns None for missing or out-of-range
+    values so the caller can fall back to mode-based state instead of
+    treating garbage as a real window.
     """
     if not isinstance(obj, dict):
         return None
@@ -123,9 +154,14 @@ def _time_to_minutes(obj: Any) -> int | None:
         minutes = int(minutes)
     except (TypeError, ValueError):
         return None
-    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+    if not (0 <= hours <= 24 and 0 <= minutes <= 60):
         return None
-    return hours * 60 + minutes
+    total = hours * 60 + minutes
+    if total == 24 * 60:
+        return 0
+    if total > 24 * 60:
+        return None
+    return total
 
 
 def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
@@ -370,25 +406,30 @@ class TrimlightLight(
         # Defaults so HA's frontend renders the color picker on first load.
         self._attr_hs_color = (0.0, 0.0)
         self._attr_brightness = 255
-        # Set initial on/off state from coordinator data so the entity
-        # doesn't start as "unknown" before the first coordinator update.
-        is_on = self._resolve_is_on(self.coordinator.data.get(device_id, {}))
+        # Set initial state from coordinator data so the entity doesn't
+        # start as "unknown" before the first coordinator update.
+        data = self.coordinator.data.get(device_id, {})
+        is_on = self._resolve_is_on(data)
         if is_on is not None:
             self._attr_is_on = is_on
+        if not data.get("_detail_stale"):
+            self._active_effect_name = _running_effect_name(data)
 
     async def async_added_to_hass(self) -> None:
         """Restore command-derived state the API can't report back.
 
-        The device detail doesn't identify the running effect or the color
-        the user last picked, so without restoring them every HA restart
-        would blank the effect and reset the color slot to white.
+        The device detail doesn't report the color the user last picked, and
+        not every controller identifies its running effect, so without
+        restoring them every HA restart would blank the effect and reset the
+        color slot to white. An effect the device itself reports wins over
+        the restored one.
         """
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is None:
             return
         effect = last.attributes.get(ATTR_EFFECT)
-        if effect:
+        if effect and self._active_effect_name is None:
             self._active_effect_name = effect
         hs_color = last.attributes.get(ATTR_HS_COLOR)
         if isinstance(hs_color, (list, tuple)) and len(hs_color) == 2:
@@ -496,15 +537,19 @@ class TrimlightLight(
             is_on = self._resolve_is_on(data)
             if is_on is not None:
                 self._attr_is_on = is_on
-            # Brightness is the one command-set attribute the device reports
-            # back (on currentEffect), so changes made in the Trimlight app
-            # flow into HA. Skip stale carried-forward detail.
+            # The device reports the running effect's brightness (and, on
+            # controllers that include it, its id) on currentEffect, so
+            # changes made in the Trimlight app flow into HA. Skip stale
+            # carried-forward detail.
             if not data.get("_detail_stale"):
                 current = data.get("currentEffect")
                 if isinstance(current, dict) and isinstance(
                     current.get("brightness"), int
                 ):
                     self._attr_brightness = current["brightness"]
+                name = _running_effect_name(data)
+                if name is not None:
+                    self._active_effect_name = name
         self.async_write_ha_state()
 
     @property

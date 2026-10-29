@@ -136,7 +136,7 @@ The point is — once your Trimlight is in HA, it plays nicely with everything e
 
 ## ⚠️ Known Limitations
 
-- **Effect name after app changes** — if you switch effects in the Trimlight app, HA won't know the name of the new effect until you pick one through HA. The API doesn't include effect names in the running state.
+- **Effect name after app changes** — HA learns the running effect from the effect id the controller reports. If your controller's firmware doesn't report one, HA won't know the name of an effect picked in the Trimlight app until you pick one through HA.
 - **Cloud only** — there's no local API. Everything goes through Trimlight's servers. If their cloud is down, your lights will show as unavailable in HA (but will still work from the app and their own timers). ☁️
 - **Rate limiting** — the Trimlight API rejects rapid concurrent requests. The integration throttles calls with a 300ms minimum gap. Very fast color changes from the HA UI are smoothed out automatically.
 - **"Could not fetch detail" / API error 12006** — occasionally Trimlight's cloud can't parse what a controller has stored, and that device's effect list, brightness, and schedule stay empty in HA (on/off still works). It's caused by the effects saved on the controller — duplicate names or names with unusual characters are known triggers — and only the Trimlight app can fix it. HA raises a repair issue (**Settings → Repairs**) with what to check. 🛠️

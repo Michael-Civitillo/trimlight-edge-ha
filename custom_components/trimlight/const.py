@@ -9,7 +9,7 @@ API_BASE_URL = "https://trimlight.ledhue.com/trimlight"
 
 UPDATE_INTERVAL = 30  # seconds
 
-# Device switch states (from Trimlight V2 API docs section 5).
+# Device switch states (API docs device fields, sections 3 and 4.1).
 SWITCH_STATE_OFF = 0
 SWITCH_STATE_MANUAL = 1
 SWITCH_STATE_TIMER = 2
@@ -24,10 +24,14 @@ SCHEDULE_REPETITION_WEEKEND = 3
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3
 
-# API result codes that mean the client credentials were rejected
-# (invalid clientId / signature per API docs section 2). These trigger a
-# reauth flow instead of being treated as a transient failure.
-API_AUTH_ERROR_CODES = frozenset({10001})
+# API result codes that mean the client credentials were rejected. The API
+# docs' result-code table (appendix [1]) lists 10001 ("Error") and 10002
+# ("Wrong password"); request and device-data problems come back as 12xxx
+# and 20000 codes instead. A request whose timestamp falls outside the
+# cloud's allowed window is rejected the same way (docs note 1.5), so a
+# wrong host clock looks like bad credentials. These trigger a reauth flow
+# instead of being treated as a transient failure.
+API_AUTH_ERROR_CODES = frozenset({10001, 10002})
 
 # API result code the device detail call returns when the cloud can't parse
 # what the controller has stored ("Device data could not be parsed. Please
