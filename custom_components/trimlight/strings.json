@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Trimlight Edge",
-        "description": "Enter the API credentials provided by Trimlight. Contact their support to obtain a clientId and clientSecret.",
+        "description": "Enter the API credentials provided by Trimlight. Apply for a clientId and clientSecret at https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply",
         "data": {
           "client_id": "Client ID",
           "client_secret": "Client Secret"

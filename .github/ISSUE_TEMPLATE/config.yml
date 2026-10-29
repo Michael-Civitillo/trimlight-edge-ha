@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Need API credentials (clientId / clientSecret)?
-    url: https://trimlight.com/support
-    about: Credentials must be requested directly from Trimlight support — this is not something the integration can provide.
+    url: https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply
+    about: Apply for credentials directly with Trimlight (see https://trimlight.com/support/does-the-edge-have-an-open-api) — this is not something the integration can provide.
   - name: Home Assistant Community Forum
     url: https://community.home-assistant.io
     about: General HA questions and discussion
