@@ -1042,3 +1042,116 @@ async def test_restores_state_after_restart(hass, mock_api):
     assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
     assert state.attributes.get(ATTR_BRIGHTNESS) == 42
     assert tuple(state.attributes.get(ATTR_HS_COLOR)) == (120.0, 100.0)
+
+
+# --------------------------------------------------------------------------- #
+# Review regressions: stale brightness, null effect lists, startup state       #
+# --------------------------------------------------------------------------- #
+
+
+async def test_brightness_back_to_reported_value_still_resaves(hass, mock_api):
+    """Setting brightness back to what the device last reported must re-save.
+
+    The effects list in coordinator data only refreshes on the next poll, so
+    right after a brightness change it still carries the old value. Comparing
+    the requested brightness against that stale value skipped the re-save, so
+    255 -> 100 -> 255 within one poll interval left the device at 100 while
+    HA showed 255.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_stale_bri",
+        unique_id="test_client_id_stale_bri",
+    )
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "NEW YEAR", ATTR_BRIGHTNESS: 100},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["brightness"] == 100
+    mock_api.save_effect.reset_mock()
+
+    # No poll has run: the fixture still reports NEW YEAR at brightness 255.
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_BRIGHTNESS: 255},
+        blocking=True,
+    )
+    mock_api.save_effect.assert_called_once()
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["name"] == "NEW YEAR"
+    assert payload["brightness"] == 255
+
+
+async def test_null_effect_list_does_not_break_the_entity(hass, mock_api):
+    """A device reporting its effects as null is a loaded device with none.
+
+    The effect list used to be iterated as is, so a null broke every state
+    write and the entity never appeared. Picking a color must still work:
+    the detail did load, there is simply no slot yet to reuse.
+    """
+    data = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "effects": None}
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=data,
+        entry_id="test_entry_null_effects",
+        unique_id="test_client_id_null_effects",
+    )
+    state = hass.states.get(_entity_id())
+    assert state is not None
+    assert state.state == STATE_ON
+    assert state.attributes.get("effect_list") == []
+
+    await hass.services.async_call(
+        "light",
+        "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (0.0, 100.0)},
+        blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == -1
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 99)
+
+
+async def test_brightness_reflects_device_at_setup(hass, mock_api):
+    """The entity shows the device's brightness from the start, not 255."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    data = {
+        MOCK_DEVICE_ID: {
+            **device,
+            "currentEffect": {**device["currentEffect"], "brightness": 100},
+        }
+    }
+    await _setup_integration(
+        hass, mock_api,
+        coordinator_data=data,
+        entry_id="test_entry_setup_bri",
+        unique_id="test_client_id_setup_bri",
+    )
+    assert hass.states.get(_entity_id()).attributes.get(ATTR_BRIGHTNESS) == 100
+
+
+async def test_first_polls_sync_on_a_freshly_booted_host(hass, mock_api):
+    """Polls must be applied before any command, whatever the monotonic clock says.
+
+    time.monotonic() is typically time since boot. The cooldown used 0.0 as
+    "no command yet", so on a host up for less than the cooldown every poll in
+    that window looked like it was inside a cooldown and was ignored.
+    """
+    with patch("custom_components.trimlight.light.time") as time_mock:
+        time_mock.monotonic.return_value = 10.0
+        coordinator = await _setup_integration(
+            hass, mock_api,
+            entry_id="test_entry_young_clock",
+            unique_id="test_client_id_young_clock",
+        )
+        assert hass.states.get(_entity_id()).state == STATE_ON
+
+        coordinator.async_set_updated_data(
+            {MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "switchState": 0}}
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(_entity_id()).state == STATE_OFF

@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The README and the setup dialog now link to Trimlight's [API credentials application form](https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply), published in their support article [Does the Edge have an open API?](https://trimlight.com/support/does-the-edge-have-an-open-api), so you can obtain a Client ID and Client Secret yourself instead of having to email Trimlight support
 
+### Fixed
+- Setting the brightness back to the value the device last reported (for example 255 → 100 → 255 within one poll interval) now applies on the device. The re-save was skipped whenever the requested brightness matched the effect's cached brightness, which is stale until the next poll, so the device kept the previous value while Home Assistant showed the new one
+- A device whose detail reports its saved effects as `null`, leaves them out, or includes malformed entries no longer breaks the light entity (it failed to be added at all) and no longer blocks picking a color: the list is treated as loaded and empty
+- The light's brightness reflects the device's current effect as soon as the entity is created instead of showing full brightness until the first poll
+- On a host that has been up for less than a minute when the integration loads, the first polls are no longer mistaken for being inside a command cooldown and ignored
+
 ## [1.2.2] - 2026-10-15
 
 ### Fixed

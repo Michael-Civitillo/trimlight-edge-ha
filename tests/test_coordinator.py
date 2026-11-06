@@ -88,6 +88,30 @@ async def test_merges_list_and_detail(coordinator):
     assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
 
 
+async def test_detail_without_effect_list_counts_as_loaded(coordinator, api):
+    """A detail with no effects list is a loaded device that has no effects.
+
+    Consumers rely on the key being present to tell "loaded, empty" from
+    "never loaded" (which blocks creating the color slot), and on the value
+    being a list, so a missing or null list is normalised to an empty one.
+    """
+    api.get_device = AsyncMock(return_value={"daily": [], "calendar": []})
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["effects"] == []
+
+    api.get_device = AsyncMock(return_value={"effects": None})
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["effects"] == []
+
+    # Entries that aren't objects are dropped rather than left to crash the
+    # entity's effect list.
+    api.get_device = AsyncMock(
+        return_value={"effects": [None, {"id": 1, "name": "NEW YEAR"}, 7]}
+    )
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["effects"] == [{"id": 1, "name": "NEW YEAR"}]
+
+
 async def test_malformed_list_entry_is_skipped(coordinator, api):
     """One list entry without a deviceId must not fail the whole update."""
     api.get_devices = AsyncMock(

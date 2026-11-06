@@ -361,7 +361,11 @@ class TrimlightLight(
         self._device_id = device_id
         self._attr_unique_id = device_id
         self._active_effect_name: str | None = None
-        self._last_command_time: float = 0.0
+        # time.monotonic() of the last command, or None while no command's
+        # optimistic state is being held. A 0.0 sentinel would read as a live
+        # cooldown on a host whose monotonic clock (usually time since boot)
+        # is still below the cooldown length.
+        self._last_command_time: float | None = None
         self._color_effect_id: int | None = None
         # Serializes this entity's commands: the check-then-act on the cached
         # color slot id would otherwise race when e.g. dragging the color
@@ -370,11 +374,9 @@ class TrimlightLight(
         # Defaults so HA's frontend renders the color picker on first load.
         self._attr_hs_color = (0.0, 0.0)
         self._attr_brightness = 255
-        # Set initial on/off state from coordinator data so the entity
-        # doesn't start as "unknown" before the first coordinator update.
-        is_on = self._resolve_is_on(self.coordinator.data.get(device_id, {}))
-        if is_on is not None:
-            self._attr_is_on = is_on
+        # Seed on/off and brightness from coordinator data so the entity
+        # doesn't report "unknown" and full brightness until the next poll.
+        self._sync_from_data()
 
     async def async_added_to_hass(self) -> None:
         """Restore command-derived state the API can't report back.
@@ -408,8 +410,13 @@ class TrimlightLight(
 
     @property
     def _effects(self) -> list[dict[str, Any]]:
-        """Return the saved effects list for this device."""
-        return self._data.get("effects", [])
+        """Return the saved effects list for this device.
+
+        The coordinator normalises a live detail's list, but data can also be
+        carried forward or absent, so a missing or null list reads as empty.
+        """
+        effects = self._data.get("effects")
+        return effects if isinstance(effects, list) else []
 
     def _effect_by_name(self, name: str) -> dict[str, Any] | None:
         """Find a saved effect by name."""
@@ -438,6 +445,30 @@ class TrimlightLight(
                 return scheduled
         return True
 
+    def _in_cooldown(self) -> bool:
+        """Return True while a recent command's optimistic state is being held."""
+        return (
+            self._last_command_time is not None
+            and time.monotonic() - self._last_command_time <= _COMMAND_COOLDOWN
+        )
+
+    def _sync_from_data(self) -> None:
+        """Take on/off and brightness from the coordinator data.
+
+        Brightness is the one command-set attribute the device reports back
+        (on ``currentEffect``), so changes made in the Trimlight app flow into
+        HA. Stale carried-forward detail is skipped.
+        """
+        data = self._data
+        is_on = self._resolve_is_on(data)
+        if is_on is not None:
+            self._attr_is_on = is_on
+        if data.get("_detail_stale"):
+            return
+        current = data.get("currentEffect")
+        if isinstance(current, dict) and isinstance(current.get("brightness"), int):
+            self._attr_brightness = current["brightness"]
+
     def _state_snapshot(self) -> tuple[Any, ...]:
         """Capture the optimistic-state fields for rollback on failure."""
         return (
@@ -460,7 +491,7 @@ class TrimlightLight(
             self._attr_brightness,
             self._active_effect_name,
         ) = snapshot
-        self._last_command_time = 0.0
+        self._last_command_time = None
         self.async_write_ha_state()
 
     # ------------------------------------------------------------------ #
@@ -491,20 +522,8 @@ class TrimlightLight(
 
     def _handle_coordinator_update(self) -> None:
         """Sync state from coordinator, respecting the optimistic cooldown."""
-        if time.monotonic() - self._last_command_time > _COMMAND_COOLDOWN:
-            data = self._data
-            is_on = self._resolve_is_on(data)
-            if is_on is not None:
-                self._attr_is_on = is_on
-            # Brightness is the one command-set attribute the device reports
-            # back (on currentEffect), so changes made in the Trimlight app
-            # flow into HA. Skip stale carried-forward detail.
-            if not data.get("_detail_stale"):
-                current = data.get("currentEffect")
-                if isinstance(current, dict) and isinstance(
-                    current.get("brightness"), int
-                ):
-                    self._attr_brightness = current["brightness"]
+        if not self._in_cooldown():
+            self._sync_from_data()
         self.async_write_ha_state()
 
     @property
@@ -639,17 +658,21 @@ class TrimlightLight(
         """Activate a saved effect, optionally with a new brightness.
 
         view_effect repaints the strip but can't change brightness, so a
-        brightness change re-saves the effect first. The save payload is
-        rebuilt from the known effect fields rather than echoing the whole
-        detail dict back at the API. Built-in effects must carry their
-        ``pixelLen``/``reverse`` the same way custom effects carry
-        ``pixels``: the cloud rejects a built-in save without ``pixelLen``.
-        The category is derived from that shape rather than echoed from the
-        device, which hasn't always reported the numbering the cloud accepts.
+        requested brightness re-saves the effect first. It is re-saved even
+        when the effect dict already shows that brightness: the dict comes
+        from the last poll, so after an earlier brightness change it is stale
+        and can't tell whether the device really has the requested value.
+        The save payload is rebuilt from the known effect fields rather than
+        echoing the whole detail dict back at the API. Built-in effects must
+        carry their ``pixelLen``/``reverse`` the same way custom effects
+        carry ``pixels``: the cloud rejects a built-in save without
+        ``pixelLen``. The category is derived from that shape rather than
+        echoed from the device, which hasn't always reported the numbering
+        the cloud accepts.
         """
         api = self.coordinator.api
         effect_id = effect["id"]
-        if brightness is not None and effect.get("brightness") != brightness:
+        if brightness is not None:
             payload = {
                 key: effect[key] for key in _EFFECT_SAVE_KEYS if key in effect
             }

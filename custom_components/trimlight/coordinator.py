@@ -196,7 +196,18 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._handle_detail_recovered(device_id)
 
             merged = {**device, **detail}
-            _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
+            # A device with nothing saved may report its effects as null or
+            # leave them out. Consumers rely on the key being present to tell
+            # "loaded, empty" from "never loaded" (which blocks creating the
+            # color slot) and on the value being a list of objects, so
+            # normalise it here, once per poll.
+            effects = merged.get("effects")
+            merged["effects"] = (
+                [e for e in effects if isinstance(e, dict)]
+                if isinstance(effects, list)
+                else []
+            )
+            _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged))
             _LOGGER.debug(
                 "Device %s switchState=%s daily=%s calendar=%s",
                 device_id,
