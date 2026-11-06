@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A device whose detail reports its saved effects as `null`, leaves them out, or includes malformed entries no longer breaks the light entity (it failed to be added at all) and no longer blocks picking a color: the list is treated as loaded and empty
 - The light's brightness reflects the device's current effect as soon as the entity is created instead of showing full brightness until the first poll
 - On a host that has been up for less than a minute when the integration loads, the first polls are no longer mistaken for being inside a command cooldown and ignored
+- The setup form trims whitespace or a trailing newline pasted around the Client ID and Client Secret, checks for an already-configured account before contacting the cloud, and logs unexpected validation errors instead of silently reporting "unknown"
 
 ## [1.2.2] - 2026-10-15
 

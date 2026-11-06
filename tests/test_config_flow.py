@@ -1,5 +1,6 @@
 """Tests for the Trimlight Edge config flow."""
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant import config_entries
@@ -178,10 +179,134 @@ async def test_already_configured_aborts(hass):
 
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "already_configured"
+        # The duplicate is caught before another round trip to the cloud.
+        assert mock_api.get_devices.await_count == 1
 
         # Cleanup entry while patches are active.
         await hass.config_entries.async_remove(first_result["result"].entry_id)
         await hass.async_block_till_done()
+
+
+async def test_user_step_strips_pasted_whitespace(hass):
+    """Credentials pasted with surrounding whitespace or a newline still work."""
+    with (
+        patch(
+            "custom_components.trimlight.config_flow.TrimlightApi"
+        ) as mock_api_cls,
+        patch(
+            "custom_components.trimlight.config_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.trimlight.async_setup_entry",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.trimlight.async_unload_entry",
+            return_value=True,
+        ),
+    ):
+        mock_api = mock_api_cls.return_value
+        mock_api.get_devices = AsyncMock(return_value=MOCK_DEVICE_LIST)
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_CLIENT_ID: "  test_id\n",
+                CONF_CLIENT_SECRET: "test_secret \n",
+            },
+        )
+        await hass.async_block_till_done()
+
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["title"] == "Trimlight (test_id)"
+        assert result["data"] == VALID_INPUT
+        assert result["result"].unique_id == "test_id"
+        mock_api_cls.assert_called_once_with("test_id", "test_secret", ANY)
+
+        await hass.config_entries.async_remove(result["result"].entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_reauth_flow_strips_pasted_whitespace(hass):
+    """A re-entered secret is trimmed the same way as on first setup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Trimlight (test_id)",
+        data=dict(VALID_INPUT),
+        unique_id="test_id",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.trimlight.config_flow.TrimlightApi"
+        ) as mock_api_cls,
+        patch(
+            "custom_components.trimlight.config_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.trimlight.async_setup_entry",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.trimlight.async_unload_entry",
+            return_value=True,
+        ),
+    ):
+        mock_api = mock_api_cls.return_value
+        mock_api.get_devices = AsyncMock(return_value=MOCK_DEVICE_LIST)
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={
+                "source": config_entries.SOURCE_REAUTH,
+                "entry_id": entry.entry_id,
+            },
+            data=dict(entry.data),
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={CONF_CLIENT_SECRET: " new_secret\n"},
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_CLIENT_SECRET] == "new_secret"
+    mock_api_cls.assert_called_once_with("test_id", "new_secret", ANY)
+
+
+async def test_unknown_validation_error_is_logged(hass, caplog):
+    """An unexpected exception during validation is logged, not swallowed."""
+    with (
+        patch(
+            "custom_components.trimlight.config_flow.TrimlightApi"
+        ) as mock_api_cls,
+        patch(
+            "custom_components.trimlight.config_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        mock_api = mock_api_cls.return_value
+        mock_api.get_devices = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=VALID_INPUT
+        )
+
+    assert result["errors"] == {"base": "unknown"}
+    assert any(
+        r.levelno == logging.ERROR and r.exc_info and "boom" in str(r.exc_info[1])
+        for r in caplog.records
+    )
 
 
 async def test_reauth_flow_updates_secret(hass):
