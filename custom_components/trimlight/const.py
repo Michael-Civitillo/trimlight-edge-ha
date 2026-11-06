@@ -7,6 +7,12 @@ CONF_CLIENT_SECRET = "client_secret"
 
 API_BASE_URL = "https://trimlight.ledhue.com/trimlight"
 
+# Where users apply for the Client ID and Client Secret this integration
+# needs, per Trimlight's support article "Does the Edge have an open API?".
+# Kept out of strings.json: hassfest rejects URLs in translated strings and
+# requires them to come in as a description placeholder.
+API_CREDENTIALS_URL = f"{API_BASE_URL}/v1/api-credentials/apply"
+
 UPDATE_INTERVAL = 30  # seconds
 
 # Device switch states (from Trimlight V2 API docs section 5).

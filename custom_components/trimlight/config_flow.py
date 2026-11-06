@@ -15,7 +15,12 @@ from homeassistant.helpers.selector import (
 )
 
 from .api import TrimlightApi, TrimlightApiError, TrimlightAuthError
-from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, DOMAIN
+from .const import (
+    API_CREDENTIALS_URL,
+    CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +92,7 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_SCHEMA,
+            description_placeholders={"apply_url": API_CREDENTIALS_URL},
             errors=errors,
         )
 

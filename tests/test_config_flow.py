@@ -1,5 +1,6 @@
 """Tests for the Trimlight Edge config flow."""
 import logging
+import pathlib
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,7 +10,12 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.trimlight.api import TrimlightApiError, TrimlightAuthError
-from custom_components.trimlight.const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, DOMAIN
+from custom_components.trimlight.const import (
+    API_CREDENTIALS_URL,
+    CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
+    DOMAIN,
+)
 
 from .conftest import MOCK_DEVICE_LIST
 
@@ -25,6 +31,29 @@ async def test_user_step_shows_form(hass):
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "user"
     assert result["errors"] == {}
+
+
+async def test_user_step_links_to_the_credentials_form(hass):
+    """The setup form links to Trimlight's credentials application form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["description_placeholders"] == {"apply_url": API_CREDENTIALS_URL}
+
+
+def test_translated_strings_contain_no_urls():
+    """Hassfest rejects URLs in translated strings; they go in placeholders.
+
+    Regression test for the Validate workflow failing with "Invalid
+    strings.json: the string should not contain URLs, please use description
+    placeholders instead" after the credentials link was added inline.
+    """
+    root = pathlib.Path(__file__).parent.parent / "custom_components" / "trimlight"
+    for name in ("strings.json", "translations/en.json"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "http://" not in text and "https://" not in text, (
+            f"{name} contains a URL; pass it as a description placeholder"
+        )
 
 
 async def test_user_step_success(hass):

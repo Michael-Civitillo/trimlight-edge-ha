@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Trimlight Edge",
-        "description": "Enter your Trimlight API credentials. You can [apply for a Client ID and Client Secret](https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply) on Trimlight's website.",
+        "description": "Enter your Trimlight API credentials. You can [apply for a Client ID and Client Secret]({apply_url}) on Trimlight's website.",
         "data": {
           "client_id": "Client ID",
           "client_secret": "Client Secret"
