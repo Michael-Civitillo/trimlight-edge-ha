@@ -119,7 +119,9 @@ class TestRequest:
     async def test_wraps_timeout(self, api):
         api._session.request = AsyncMock(side_effect=TimeoutError())
 
-        with pytest.raises(TrimlightApiError):
+        # str() of a bare TimeoutError is empty; the message must still say
+        # what went wrong rather than ending in "failed: ".
+        with pytest.raises(TrimlightApiError, match="failed: TimeoutError"):
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio
