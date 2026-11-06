@@ -24,13 +24,15 @@ This connects to the Trimlight cloud API and exposes each of your controllers as
 
 ## 🔑 Before You Start — Getting API Credentials
 
-This integration requires a **Client ID** and **Client Secret** from Trimlight. These aren't available publicly — you have to email Trimlight support and ask for developer API access. Mention you're building a Home Assistant integration.
+This integration requires a **Client ID** and **Client Secret** from Trimlight.
 
-> Trimlight's own documentation says: *"Please contact our business to obtain clientId and clientSecret."*
+You can now apply for your own credentials directly from Trimlight:
 
-💬 In my case, I was able to obtain my Client Secret from **Ryan Whittaker** at **Ryan@trimlight.net** — reaching out there may be a good starting point.
+👉 **[Apply for API credentials](https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply)**
 
-Once you have them, setup takes about 30 seconds. ⏱️
+This link comes from Trimlight's support article [Does the Edge have an open API?](https://trimlight.com/support/does-the-edge-have-an-open-api). Once you have your Client ID and Client Secret, setup takes about 30 seconds. ⏱️
+
+💬 If that doesn't work for you, you can still email Trimlight support and ask for developer API access — mention you're building a Home Assistant integration. In my case, I was able to obtain my Client Secret from **Ryan Whittaker** at **Ryan@trimlight.net**.
 
 ---
 
