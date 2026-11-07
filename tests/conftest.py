@@ -10,11 +10,13 @@ from custom_components.trimlight.const import CONF_CLIENT_ID, CONF_CLIENT_SECRET
 MOCK_DEVICE_ID = "device_abc123"
 MOCK_DEVICE_NAME = "Front House"
 
+# Shaped like the real /devices response. Note there is NO switchState here:
+# a controller reports it only on the detail payload, so anything deriving
+# on/off from the list alone has nothing to work with.
 MOCK_DEVICE_LIST = [
     {
         "deviceId": MOCK_DEVICE_ID,
         "name": MOCK_DEVICE_NAME,
-        "switchState": 1,
         "connectivity": 1,
         "state": 0,
         "fwVersionName": "1.17.4171",
@@ -68,11 +70,20 @@ MOCK_DEVICE_DETAIL = {
             ],
         },
     ],
+    # Shaped like a real controller's currentEffect: it carries the running
+    # pattern and no id, so the running effect has to be matched by content.
     "currentEffect": {
         "category": 1,
         "mode": 0,
         "speed": 127,
         "brightness": 255,
+        "pixels": [
+            {"index": 0, "count": 1, "color": 14509076, "disable": False},
+            *[
+                {"index": i, "count": 0, "color": 0, "disable": False}
+                for i in range(1, 30)
+            ],
+        ],
     },
     "combinedEffect": {"effectIds": [], "interval": 5},
     "daily": [],

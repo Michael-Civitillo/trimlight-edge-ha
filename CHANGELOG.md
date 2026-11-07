@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Timeouts are named in error messages and logs, which used to end in `failed: ` with nothing after the colon
 - Retrying setup with the same Client ID after a failed attempt no longer dead-ends on a dialog reading `already_in_progress`. The duplicate check now runs without claiming the in-progress flow, so a wrong secret can simply be corrected
 - The setup form keeps the Client ID and Client Secret you pasted when it comes back with an error, instead of emptying both fields on every retry
+- Turning the light on from Home Assistant now always powers the controller on. Home Assistant's idea of whether the light was already on comes from a poll up to 30 seconds old, so a plain "turn on" could send nothing at all and leave the lights off while Home Assistant showed them on. Picking an effect or a colour was the only way to actually turn them on
+- The brightness slider no longer replaces a running pattern with solid white. Controllers report the running pattern on `currentEffect` without an id, so the running effect is now identified by its content and re-saved with the new brightness. When it genuinely cannot be identified, the command is refused with an explanation instead of repainting the strip
+- The colour picker now shows the colour the strip is actually displaying, read back from `currentEffect`, instead of whatever Home Assistant last sent. A colour set in the Trimlight app, or one surviving a restart, is no longer silently reapplied from a stale value
+- Selecting an effect immediately shows that effect's own brightness, which the controller adopts, instead of leaving the slider on the previous value for up to 90 seconds
+- A timed-out colour save no longer forgets which effect slot to reuse, so the retry updates the existing "HA Color" effect rather than creating a duplicate. Duplicate effect names are a documented cause of API error 12006. Only an outright rejection from the cloud now invalidates the cached slot
+- The test fixtures now match what controllers really return, notably that `switchState` appears only on the device detail and never in the device list
 
 ## [1.2.2] - 2026-10-15
 

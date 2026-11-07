@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_EFFECT, ATTR_HS_COLOR
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.const import (
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
@@ -22,7 +27,11 @@ from custom_components.trimlight.const import (
     HA_COLOR_EFFECT_NAME,
 )
 from custom_components.trimlight.light import (
+    _api_color_to_hs,
     _effect_category,
+    _hs_to_api_color,
+    _match_running_effect,
+    _running_color,
     _now_in_window,
     _timer_schedule_is_on,
     _time_to_minutes,
@@ -395,18 +404,22 @@ async def test_effect_list_skips_unnamed_effects(hass, mock_api):
     assert state.attributes["effect_list"] == ["NEW YEAR", "INDEPENDENCE DAY"]
 
 
-async def test_plain_turn_on_while_on_is_noop(hass, mock_api):
-    """Plain turn_on on an already-on device must not change the effect.
+async def test_plain_turn_on_always_powers_on(hass, mock_api):
+    """A plain turn_on must power the device on even when HA thinks it is on.
 
-    Re-issuing MANUAL would revert an effect activated via view_effect, so a
-    no-op is the correct behaviour here.
+    Regression test: HA's belief comes from a poll up to 30 seconds old, or
+    from optimistic state, so trusting it meant a plain turn_on could send
+    nothing at all. Users saw the lights stay off while HA showed them on,
+    and only picking an effect or a colour actually turned them on. It must
+    not force an effect, though: the device resumes what it was showing.
     """
     await _setup_integration(hass, mock_api)
     await hass.services.async_call(
         "light", "turn_on", {"entity_id": _entity_id()}, blocking=True
     )
+    mock_api.set_switch_state.assert_called_once_with(MOCK_DEVICE_ID, 1)
     mock_api.view_effect.assert_not_called()
-    mock_api.set_switch_state.assert_not_called()
+    mock_api.save_effect.assert_not_called()
 
 
 async def test_plain_turn_on_while_off_powers_on(hass, mock_api):
@@ -580,9 +593,11 @@ async def test_color_recovers_after_stale_effect_id(hass, mock_api):
     )
     assert mock_api.save_effect.call_args[0][1]["id"] == -1
 
-    # Slot deleted on the device — save with the cached id now fails, which
+    # Slot deleted on the device — the cloud answers with a result code, which
     # surfaces to the caller instead of reporting a silent success.
-    mock_api.save_effect.side_effect = TrimlightApiError("effect not found")
+    mock_api.save_effect.side_effect = TrimlightApiError(
+        "API error 12004: effect not found", code=12004
+    )
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
             "light",
@@ -609,6 +624,45 @@ async def test_color_recovers_after_stale_effect_id(hass, mock_api):
 # --------------------------------------------------------------------------- #
 # Command failure handling, brightness routing, availability, late devices    #
 # --------------------------------------------------------------------------- #
+
+
+async def test_transient_save_failure_keeps_the_colour_slot(hass, mock_api):
+    """A timeout must not make the next colour pick create a second slot.
+
+    Regression test: the cached slot id used to be dropped on any error,
+    including a transport failure that says nothing about whether the slot
+    still exists. With no poll in between there is no way to re-resolve it by
+    name, so the retry created a duplicate "HA Color" effect — the
+    duplicate-name condition that breaks the cloud's parsing.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_transient", unique_id="test_client_id_transient",
+    )
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (0.0, 100.0)}, blocking=True,
+    )
+    assert mock_api.save_effect.call_args[0][1]["id"] == -1
+
+    # A transport failure carries no API result code.
+    mock_api.save_effect.side_effect = TrimlightApiError(
+        "Request to /path failed: TimeoutError"
+    )
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light", "turn_on",
+            {"entity_id": _entity_id(), ATTR_HS_COLOR: (120.0, 100.0)},
+            blocking=True,
+        )
+
+    mock_api.save_effect.side_effect = None
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": _entity_id(), ATTR_HS_COLOR: (240.0, 100.0)}, blocking=True,
+    )
+    # Still the known slot, not a blind create.
+    assert mock_api.save_effect.call_args[0][1]["id"] == 99
 
 
 async def test_turn_off_failure_raises_and_reverts(hass, mock_api):
@@ -935,7 +989,9 @@ async def test_color_without_effect_list_does_not_create_a_slot(hass, mock_api):
             blocking=True,
         )
     # Brightness alone routes through the color slot on a fresh entity too.
-    with pytest.raises(HomeAssistantError, match="has not loaded"):
+    # Brightness alone is refused earlier still: with no detail there is
+    # nothing to re-save but the color slot, and that would repaint the strip.
+    with pytest.raises(ServiceValidationError, match="does not know"):
         await hass.services.async_call(
             "light",
             "turn_on",
@@ -946,9 +1002,10 @@ async def test_color_without_effect_list_does_not_create_a_slot(hass, mock_api):
     mock_api.view_effect.assert_not_called()
     # The optimistic write was rolled back: HA doesn't claim a color applied.
     state = hass.states.get(_entity_id())
-    assert state.state == STATE_ON
+    # A device list carries no switchState, so with no detail the on/off state
+    # is genuinely unknown rather than guessed at.
+    assert state.state == STATE_UNKNOWN
     assert state.attributes.get(ATTR_EFFECT) is None
-    assert state.attributes.get(ATTR_BRIGHTNESS) == 255
 
 
 async def test_color_with_known_slot_works_without_effect_list(hass, mock_api):
@@ -1155,3 +1212,132 @@ async def test_first_polls_sync_on_a_freshly_booted_host(hass, mock_api):
         )
         await hass.async_block_till_done()
         assert hass.states.get(_entity_id()).state == STATE_OFF
+
+
+# --------------------------------------------------------------------------- #
+# Reading the running effect and its colour back from the device              #
+# --------------------------------------------------------------------------- #
+
+
+def test_api_colour_round_trips():
+    """The inverse conversion must return the hue and saturation sent."""
+    for hs in ((0.0, 100.0), (120.0, 100.0), (240.0, 100.0), (30.0, 50.0)):
+        assert _api_color_to_hs(_hs_to_api_color(hs)) == pytest.approx(hs, abs=0.75)
+    assert _api_color_to_hs(0xFF0000) == pytest.approx((0.0, 100.0), abs=0.01)
+    assert _api_color_to_hs(0x00FF00) == pytest.approx((120.0, 100.0), abs=0.01)
+
+
+def test_running_colour_only_for_a_solid_pattern():
+    """A multi-colour pattern has no single colour to report."""
+    solid = {"pixels": [{"index": 0, "count": 1, "color": 0xFF0000},
+                        {"index": 1, "count": 0, "color": 0}]}
+    assert _running_color(solid) == 0xFF0000
+    multi = {"pixels": [{"index": 0, "count": 5, "color": 0xFF0000},
+                        {"index": 1, "count": 5, "color": 0x0000FF}]}
+    assert _running_color(multi) is None
+    assert _running_color({}) is None
+    assert _running_color({"pixels": []}) is None
+
+
+def test_match_running_effect_needs_an_unambiguous_answer():
+    """Content matching identifies the running effect, but never guesses."""
+    custom = {"id": 1, "name": "NEW YEAR", "category": 1, "mode": 0, "speed": 127,
+              "brightness": 255, "pixels": [{"index": 0, "count": 1, "color": 9}]}
+    builtin = {"id": 3, "name": "Wave", "category": 0, "mode": 3, "speed": 100,
+               "brightness": 255, "pixelLen": 30, "reverse": False}
+    effects = [custom, builtin]
+
+    # A controller that reports no id still identifies itself by content.
+    running = {k: v for k, v in custom.items() if k not in ("id", "name")}
+    assert _match_running_effect(running, effects) is custom
+    running_builtin = {k: v for k, v in builtin.items() if k not in ("id", "name")}
+    assert _match_running_effect(running_builtin, effects) is builtin
+
+    # Two effects identical apart from their name are not guessed between.
+    twin = {**custom, "id": 7, "name": "NEW YEAR copy"}
+    assert _match_running_effect(running, [custom, twin]) is None
+
+    # Nothing recognisable, and an empty list, both mean "do not know".
+    assert _match_running_effect({"category": 1, "mode": 9}, effects) is None
+    assert _match_running_effect(running, []) is None
+
+    # An id is used directly when the controller does report one.
+    assert _match_running_effect({"id": 3}, effects) is builtin
+
+
+async def test_running_effect_is_recovered_from_the_device(hass, mock_api):
+    """HA learns what is running from currentEffect, with no id reported.
+
+    This is what keeps a later brightness-only command from falling through to
+    the colour slot and repainting the strip.
+    """
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_identify", unique_id="test_client_id_identify",
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+
+    # So a brightness-only command re-saves that effect rather than a colour.
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": _entity_id(), ATTR_BRIGHTNESS: 90}, blocking=True,
+    )
+    payload = mock_api.save_effect.call_args[0][1]
+    assert payload["name"] == "NEW YEAR"
+    assert payload["brightness"] == 90
+
+
+async def test_colour_picker_follows_the_device(hass, mock_api):
+    """The colour shown is the one on the strip, not the last one HA sent."""
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    data = {
+        MOCK_DEVICE_ID: {
+            **device,
+            "currentEffect": {
+                **device["currentEffect"],
+                "pixels": [
+                    {"index": 0, "count": 1, "color": 0x00FF00, "disable": False},
+                    *[{"index": i, "count": 0, "color": 0, "disable": False}
+                      for i in range(1, 30)],
+                ],
+            },
+        }
+    }
+    await _setup_integration(
+        hass, mock_api, coordinator_data=data,
+        entry_id="test_entry_colourback", unique_id="test_client_id_colourback",
+    )
+    hs = hass.states.get(_entity_id()).attributes.get(ATTR_HS_COLOR)
+    assert tuple(hs) == pytest.approx((120.0, 100.0), abs=0.01)
+
+
+async def test_selecting_an_effect_shows_its_brightness_at_once(hass, mock_api):
+    """Activating an effect adopts its stored brightness, so HA must show it.
+
+    Regression test: HA kept the previous number for up to 90 seconds, because
+    the optimistic window suppressed the polls carrying the real value. The
+    correct brightness is already in the effect the code is holding.
+    """
+    device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
+    data = {
+        MOCK_DEVICE_ID: {
+            **device,
+            "effects": [
+                device["effects"][0],
+                {**device["effects"][1], "brightness": 120},
+            ],
+        }
+    }
+    coordinator = await _setup_integration(
+        hass, mock_api, coordinator_data=data,
+        entry_id="test_entry_fxbright", unique_id="test_client_id_fxbright",
+    )
+    assert coordinator is not None
+    await hass.services.async_call(
+        "light", "turn_on",
+        {"entity_id": _entity_id(), ATTR_EFFECT: "INDEPENDENCE DAY"}, blocking=True,
+    )
+    state = hass.states.get(_entity_id())
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 120

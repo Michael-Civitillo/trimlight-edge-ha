@@ -103,6 +103,74 @@ def _hs_to_api_color(hs: tuple[float, float]) -> int:
     return (round(r * 255) << 16) | (round(g * 255) << 8) | round(b * 255)
 
 
+def _api_color_to_hs(color: int) -> tuple[float, float]:
+    """Convert an API decimal RGB integer back to HA hs_color.
+
+    The inverse of ``_hs_to_api_color``. The device reports the pattern it is
+    actually running on ``currentEffect.pixels``, so this is what lets HA show
+    the colour on the strip rather than the last one it happened to send.
+    """
+    r = ((color >> 16) & 0xFF) / 255.0
+    g = ((color >> 8) & 0xFF) / 255.0
+    b = (color & 0xFF) / 255.0
+    h, s, _ = colorsys.rgb_to_hsv(r, g, b)
+    return (round(h * 360.0, 3), round(s * 100.0, 3))
+
+
+def _running_color(current: dict[str, Any]) -> int | None:
+    """Return the solid colour ``currentEffect`` is running, if it is one.
+
+    Only a pattern with a single lit entry is a solid colour; anything else is
+    a multi-colour effect whose first pixel would be misleading as "the"
+    colour.
+    """
+    pixels = current.get("pixels")
+    if not isinstance(pixels, list) or not pixels:
+        return None
+    lit = [
+        p for p in pixels
+        if isinstance(p, dict) and isinstance(p.get("count"), int) and p["count"] > 0
+    ]
+    if len(lit) != 1:
+        return None
+    color = lit[0].get("color")
+    return color if isinstance(color, int) else None
+
+
+def _effect_signature(effect: dict[str, Any]) -> tuple:
+    """Identify an effect by its content, ignoring id, name and brightness."""
+    pixels = effect.get("pixels")
+    return (
+        _effect_category(effect),
+        effect.get("mode"),
+        effect.get("speed"),
+        repr(pixels) if pixels else None,
+        effect.get("pixelLen"),
+        effect.get("reverse"),
+    )
+
+
+def _match_running_effect(
+    current: dict[str, Any], effects: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Return the saved effect ``currentEffect`` is running, if unambiguous.
+
+    Controllers have been seen reporting no ``id`` on ``currentEffect`` while
+    still reporting the pattern itself, so the running effect can be matched
+    by content. A tie means two saved effects are identical apart from their
+    name, and guessing between them would be worse than not knowing.
+    """
+    if not effects:
+        return None
+    if current.get("id") is not None:
+        by_id = [e for e in effects if e.get("id") == current["id"]]
+        if len(by_id) == 1:
+            return by_id[0]
+    wanted = _effect_signature(current)
+    matches = [e for e in effects if _effect_signature(e) == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _time_to_minutes(obj: Any) -> int | None:
     """Convert a schedule time object to minutes-since-midnight.
 
@@ -453,11 +521,13 @@ class TrimlightLight(
         )
 
     def _sync_from_data(self) -> None:
-        """Take on/off and brightness from the coordinator data.
+        """Take on/off, brightness, the running effect and its colour from data.
 
-        Brightness is the one command-set attribute the device reports back
-        (on ``currentEffect``), so changes made in the Trimlight app flow into
-        HA. Stale carried-forward detail is skipped.
+        ``currentEffect`` carries the brightness, and on the controllers seen
+        so far the running pattern itself, so changes made in the Trimlight app
+        flow into HA. Identifying the running effect also keeps a later
+        brightness-only command from falling through to the colour slot and
+        repainting the strip. Stale carried-forward detail is skipped.
         """
         data = self._data
         is_on = self._resolve_is_on(data)
@@ -466,8 +536,20 @@ class TrimlightLight(
         if data.get("_detail_stale"):
             return
         current = data.get("currentEffect")
-        if isinstance(current, dict) and isinstance(current.get("brightness"), int):
+        if not isinstance(current, dict):
+            return
+        if isinstance(current.get("brightness"), int):
             self._attr_brightness = current["brightness"]
+
+        running = _match_running_effect(current, self._effects)
+        if running is not None and running.get("name"):
+            self._active_effect_name = running["name"]
+            if running["name"] == HA_COLOR_EFFECT_NAME and running.get("id") is not None:
+                self._color_effect_id = running["id"]
+
+        color = _running_color(current)
+        if color is not None:
+            self._attr_hs_color = _api_color_to_hs(color)
 
     def _state_snapshot(self) -> tuple[Any, ...]:
         """Capture the optimistic-state fields for rollback on failure."""
@@ -577,14 +659,12 @@ class TrimlightLight(
                     self._device_id,
                     effect_name,
                 )
+        elif hs_color is None and brightness is not None:
+            problem = self._brightness_only_target()
+            if problem is not None:
+                raise ServiceValidationError(problem)
 
         async with self._command_lock:
-            # view_effect/save_effect activate an effect but never touch the
-            # device's persisted switchState, so a fresh power-on must set it
-            # to MANUAL explicitly. Without it the shadow keeps reporting OFF
-            # and the entity flips back to off once the cooldown expires.
-            # Captured before the optimistic flag below overwrites it.
-            needs_power_on = not self._attr_is_on
             snapshot = self._state_snapshot()
 
             # Optimistic update — holds for _COMMAND_COOLDOWN seconds. Only
@@ -599,11 +679,15 @@ class TrimlightLight(
             self.async_write_ha_state()
 
             try:
-                # Power on first when needed: setting switchState=MANUAL makes
-                # the device resume its persisted effect, which would otherwise
-                # override an effect/color activated beforehand.
-                if needs_power_on:
-                    await self._power_on()
+                # Always power on first, even when HA already believes the
+                # light is on. That belief comes from a poll up to 30s old, or
+                # from optimistic state, so trusting it meant a plain turn_on
+                # could send nothing at all and leave the lights off while HA
+                # showed them on. Setting switchState=MANUAL makes the device
+                # resume its persisted effect, so it is safe to repeat, and it
+                # must come first or it would override an effect or colour
+                # activated beforehand.
+                await self._power_on()
                 if effect is not None:
                     await self._activate_effect(effect, brightness)
                 elif hs_color is not None:
@@ -684,6 +768,11 @@ class TrimlightLight(
             effect_id = (result or {}).get("id", effect_id)
         await api.view_effect(self._device_id, effect_id)
         self._active_effect_name = effect.get("name")
+        if brightness is None and isinstance(effect.get("brightness"), int):
+            # The controller adopts the effect's own stored brightness, so
+            # show that immediately instead of leaving the slider on whatever
+            # was running before until the optimistic window expires.
+            self._attr_brightness = effect["brightness"]
 
     async def _apply_brightness(self, brightness: int) -> None:
         """Apply brightness to whatever the device is currently showing.
@@ -705,6 +794,26 @@ class TrimlightLight(
                 self._device_id,
             )
         await self._set_color(self._attr_hs_color or (0.0, 0.0), brightness)
+
+    def _brightness_only_target(self) -> str | None:
+        """Explain why a brightness-only command cannot be applied, or None.
+
+        With no idea what is running, the only thing left to re-save is the
+        colour slot, which would replace the pattern on the strip with a solid
+        colour nobody asked for. Refusing is the honest answer.
+        """
+        if self._active_effect_name is not None:
+            return None
+        if self._data.get("currentEffect") is None and not self._effects:
+            return (
+                "Home Assistant does not know what this light is showing yet."
+                " Wait for the next update, or pick an effect or a colour."
+            )
+        return (
+            "Home Assistant cannot tell which effect this light is running, so"
+            " changing only the brightness would replace it with a solid"
+            " colour. Pick an effect or a colour first."
+        )
 
     async def _set_color(
         self, hs: tuple[float, float], brightness: int
@@ -755,11 +864,16 @@ class TrimlightLight(
                     "pixels": pixels,
                 },
             )
-        except TrimlightApiError:
-            # The cached slot may be stale (e.g. the effect was deleted in
-            # the Trimlight app). Drop it so the next attempt re-resolves
-            # by name or creates a new slot instead of failing forever.
-            self._color_effect_id = None
+        except TrimlightApiError as err:
+            # The cached slot may be stale (e.g. the effect was deleted in the
+            # Trimlight app), so drop it and let the next attempt re-resolve by
+            # name or create one. Only when the cloud actually answered,
+            # though: a timeout or a dropped connection says nothing about
+            # whether the slot still exists, and forgetting it there makes the
+            # retry create a second "HA Color" effect — the duplicate-name
+            # condition that breaks the cloud's parsing.
+            if err.code is not None:
+                self._color_effect_id = None
             raise
 
         saved_id = (result or {}).get("id", effect_id)
