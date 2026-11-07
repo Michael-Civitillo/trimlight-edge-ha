@@ -68,14 +68,29 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the initial step: collect clientId and clientSecret."""
         errors: dict[str, str] = {}
+        # Values to put back in the form if it has to be shown again, so a
+        # failed attempt doesn't send the user back to their password manager
+        # for both fields. The secret's selector renders it masked.
+        suggested: dict[str, Any] = {}
 
         if user_input is not None:
             # Credentials are pasted; stray whitespace or a trailing newline
             # would only show up as a baffling "invalid auth".
             client_id = user_input[CONF_CLIENT_ID].strip()
             client_secret = user_input[CONF_CLIENT_SECRET].strip()
+            suggested = {
+                CONF_CLIENT_ID: client_id,
+                CONF_CLIENT_SECRET: client_secret,
+            }
             # Catch a duplicate account before a round trip to the cloud.
-            await self.async_set_unique_id(client_id)
+            #
+            # raise_on_progress=False because this id comes from what the user
+            # typed, not from discovery. With the default, a failed attempt
+            # leaves this flow in progress still holding the id, and the user's
+            # next attempt with the same id aborts on "already_in_progress" —
+            # a reason this integration has no translation for, so the dialog
+            # would show the bare key and dead-end.
+            await self.async_set_unique_id(client_id, raise_on_progress=False)
             self._abort_if_unique_id_configured()
             error = await self._async_validate(client_id, client_secret)
             if error is not None:
@@ -91,7 +106,9 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_SCHEMA,
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_USER_SCHEMA, suggested
+            ),
             description_placeholders={"apply_url": API_CREDENTIALS_URL},
             errors=errors,
         )

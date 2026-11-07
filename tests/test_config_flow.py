@@ -216,6 +216,108 @@ async def test_already_configured_aborts(hass):
         await hass.async_block_till_done()
 
 
+def _suggested(result) -> dict:
+    """Return the suggested values carried by a shown form's schema."""
+    return {
+        str(key): key.description["suggested_value"]
+        for key in result["data_schema"].schema
+        if getattr(key, "description", None)
+        and "suggested_value" in key.description
+    }
+
+
+async def test_retry_after_a_failed_attempt_is_not_blocked(hass):
+    """A second attempt with the same Client ID must not dead-end.
+
+    Regression test: the duplicate check runs before validation, so a failed
+    attempt leaves its flow in progress holding the unique id. With the
+    default raise_on_progress the user's next attempt with the same Client ID
+    aborted on "already_in_progress" — a reason with no entry in strings.json,
+    so the dialog showed the bare key and there was no way forward.
+    """
+    with (
+        patch(
+            "custom_components.trimlight.config_flow.TrimlightApi"
+        ) as mock_api_cls,
+        patch(
+            "custom_components.trimlight.config_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.trimlight.async_setup_entry",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.trimlight.async_unload_entry",
+            return_value=True,
+        ),
+    ):
+        mock_api = mock_api_cls.return_value
+        mock_api.get_devices = AsyncMock(
+            side_effect=TrimlightAuthError("API auth error 10001: auth error")
+        )
+
+        # First attempt: wrong secret. The form comes back with an error and
+        # this flow stays in progress.
+        first = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        first = await hass.config_entries.flow.async_configure(
+            first["flow_id"], user_input=VALID_INPUT
+        )
+        assert first["type"] == FlowResultType.FORM
+        assert first["errors"] == {"base": "invalid_auth"}
+
+        # The user starts over rather than reusing that dialog.
+        mock_api.get_devices = AsyncMock(return_value=MOCK_DEVICE_LIST)
+        second = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        second = await hass.config_entries.flow.async_configure(
+            second["flow_id"], user_input=VALID_INPUT
+        )
+        await hass.async_block_till_done()
+
+        assert second["type"] == FlowResultType.CREATE_ENTRY
+        assert second["data"] == VALID_INPUT
+
+        await hass.config_entries.async_remove(second["result"].entry_id)
+        await hass.async_block_till_done()
+
+
+async def test_form_keeps_credentials_after_an_error(hass):
+    """A re-shown form carries the pasted values back, trimmed."""
+    with (
+        patch(
+            "custom_components.trimlight.config_flow.TrimlightApi"
+        ) as mock_api_cls,
+        patch(
+            "custom_components.trimlight.config_flow.async_get_clientsession",
+            return_value=MagicMock(),
+        ),
+    ):
+        mock_api = mock_api_cls.return_value
+        mock_api.get_devices = AsyncMock(side_effect=TrimlightApiError("fail"))
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        # The first form is empty; nothing has been typed yet.
+        assert _suggested(result) == {}
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_CLIENT_ID: "  test_id\n",
+                CONF_CLIENT_SECRET: "test_secret ",
+            },
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert _suggested(result) == VALID_INPUT
+
+
 async def test_user_step_strips_pasted_whitespace(hass):
     """Credentials pasted with surrounding whitespace or a newline still work."""
     with (
