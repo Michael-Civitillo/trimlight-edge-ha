@@ -1350,12 +1350,13 @@ async def test_colour_picker_follows_the_device(hass, mock_api):
     assert tuple(hs) == pytest.approx((120.0, 100.0), abs=0.01)
 
 
-async def test_selecting_an_effect_shows_its_brightness_at_once(hass, mock_api):
-    """Activating an effect adopts its stored brightness, so HA must show it.
+async def test_selecting_an_effect_keeps_the_running_brightness(hass, mock_api):
+    """Activating an effect must not claim that effect's stored brightness.
 
-    Regression test: HA kept the previous number for up to 90 seconds, because
-    the optimistic window suppressed the polls carrying the real value. The
-    correct brightness is already in the effect the code is holding.
+    Testing against a real controller showed activating an effect does not
+    apply its stored brightness: the strip keeps the brightness it was already
+    running, which the device reports on currentEffect. Copying the stored
+    value would make Home Assistant show a number the lights are not using.
     """
     device = MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID]
     data = {
@@ -1367,15 +1368,15 @@ async def test_selecting_an_effect_shows_its_brightness_at_once(hass, mock_api):
             ],
         }
     }
-    coordinator = await _setup_integration(
+    await _setup_integration(
         hass, mock_api, coordinator_data=data,
         entry_id="test_entry_fxbright", unique_id="test_client_id_fxbright",
     )
-    assert coordinator is not None
+    before = hass.states.get(_entity_id()).attributes.get(ATTR_BRIGHTNESS)
     await hass.services.async_call(
         "light", "turn_on",
         {"entity_id": _entity_id(), ATTR_EFFECT: "INDEPENDENCE DAY"}, blocking=True,
     )
     state = hass.states.get(_entity_id())
     assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
-    assert state.attributes.get(ATTR_BRIGHTNESS) == 120
+    assert state.attributes.get(ATTR_BRIGHTNESS) == before

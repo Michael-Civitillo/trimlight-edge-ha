@@ -88,20 +88,20 @@ async def test_merges_list_and_detail(coordinator):
     assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
 
 
-async def test_detail_without_effect_list_counts_as_loaded(coordinator, api):
-    """A detail with no effects list is a loaded device that has no effects.
+async def test_effects_list_is_normalised(coordinator, api):
+    """Only an explicit list is taken as the device's saved effects.
 
-    Consumers rely on the key being present to tell "loaded, empty" from
-    "never loaded" (which blocks creating the color slot), and on the value
-    being a list, so a missing or null list is normalised to an empty one.
+    A missing or null list is not evidence the device has none, so the key is
+    left absent when nothing is known yet. That absence is what stops a color
+    pick creating an "HA Color" slot blind.
     """
     api.get_device = AsyncMock(return_value={"daily": [], "calendar": []})
     data = await coordinator._async_update_data()
-    assert data[DEVICE_ID]["effects"] == []
+    assert "effects" not in data[DEVICE_ID]
 
     api.get_device = AsyncMock(return_value={"effects": None})
     data = await coordinator._async_update_data()
-    assert data[DEVICE_ID]["effects"] == []
+    assert "effects" not in data[DEVICE_ID]
 
     # Entries that aren't objects are dropped rather than left to crash the
     # entity's effect list.
@@ -110,6 +110,31 @@ async def test_detail_without_effect_list_counts_as_loaded(coordinator, api):
     )
     data = await coordinator._async_update_data()
     assert data[DEVICE_ID]["effects"] == [{"id": 1, "name": "NEW YEAR"}]
+
+
+async def test_a_missing_effects_list_keeps_the_last_known_one(coordinator, api):
+    """A detail that says nothing about effects must not blank the effect list.
+
+    Regression test: a controller with saved effects was seen answering an
+    otherwise successful detail fetch without an effects list, which emptied
+    the effect dropdown in Home Assistant until a later poll refilled it.
+    Controllers do not lose their saved effects spontaneously, so the last
+    known list is kept instead.
+    """
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.data[DEVICE_ID]["effects"] == [{"id": 1, "name": "NEW YEAR"}]
+
+    api.get_device = AsyncMock(return_value={"daily": [], "calendar": []})
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["effects"] == [{"id": 1, "name": "NEW YEAR"}]
+    assert data[DEVICE_ID]["_effects_carried"] is True
+
+    # An explicit empty list IS authoritative: the user may have deleted them.
+    coordinator.data = data
+    api.get_device = AsyncMock(return_value={"effects": []})
+    data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["effects"] == []
+    assert "_effects_carried" not in data[DEVICE_ID]
 
 
 async def test_malformed_list_entry_is_skipped(coordinator, api):
