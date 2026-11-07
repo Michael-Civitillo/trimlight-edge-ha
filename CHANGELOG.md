@@ -20,9 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retrying setup with the same Client ID after a failed attempt no longer dead-ends on a dialog reading `already_in_progress`. The duplicate check now runs without claiming the in-progress flow, so a wrong secret can simply be corrected
 - The setup form keeps the Client ID and Client Secret you pasted when it comes back with an error, instead of emptying both fields on every retry
 
-### Added
-- `scripts/trimlight_doctor.py`, a standard-library-only diagnostic you can run against a real setup. Its read-only `probe` mode reports what your controllers actually return and flags the conditions known to cause trouble, including the duplicate and oddly named saved effects behind API error 12006. Its `scenario` mode reproduces specific behaviours against a real light, and requires `--allow-writes`
-
 ## [1.2.2] - 2026-10-15
 
 ### Fixed
