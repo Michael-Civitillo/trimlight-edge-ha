@@ -774,11 +774,14 @@ class TrimlightLight(
             effect_id = (result or {}).get("id", effect_id)
         await api.view_effect(self._device_id, effect_id)
         self._active_effect_name = effect.get("name")
-        # Deliberately NOT taking the effect's stored brightness here. Testing
-        # against a real controller showed activating an effect does not apply
-        # it: the strip keeps the brightness it was already running, which the
-        # device reports on currentEffect. Copying the stored value would make
-        # Home Assistant show a number the lights are not using.
+        if brightness is None and isinstance(effect.get("brightness"), int):
+            # A controller adopts the effect's own stored brightness when the
+            # effect is activated, measured once both the cloud shadow and the
+            # entity had settled. Publish it now: otherwise the slider shows
+            # the previous value until the optimistic window expires and a poll
+            # lands, up to about 90s. A wrong guess self-corrects on that poll,
+            # since the brightness otherwise comes from currentEffect.
+            self._attr_brightness = effect["brightness"]
 
     async def _apply_brightness(self, brightness: int) -> None:
         """Apply brightness to whatever the device is currently showing.
