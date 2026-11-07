@@ -30,3 +30,6 @@ ignore = [
 "custom_components/trimlight/const.py" = [
     "S105",   # CONF_CLIENT_SECRET is a config key name, not a secret
 ]
+"scripts/**" = [
+    "S310",   # URLs are built from constants in this file, never user input
+]

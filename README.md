@@ -145,6 +145,34 @@ The point is — once your Trimlight is in HA, it plays nicely with everything e
 
 ---
 
+## 🩺 Diagnosing Your Setup
+
+`scripts/trimlight_doctor.py` checks a real controller against what this integration expects. It needs only Python 3.11+ and the standard library, so it runs anywhere, including inside the Home Assistant container.
+
+The default mode is **read-only** and writes nothing to your controllers:
+
+```bash
+python3 scripts/trimlight_doctor.py probe --client-id YOUR_ID --client-secret YOUR_SECRET
+```
+
+It reports what your devices actually return and flags the conditions known to cause trouble: duplicate saved-effect names and names with stray whitespace or unusual characters (the documented triggers for API error 12006), duplicate **HA Color** slots, effect categories the cloud rejects, schedule times HA can't parse, and whether your controller reports which effect is running. Run it first if HA shows an empty effect list or a repair issue.
+
+It can also reproduce specific behaviours against a real light. These **change your lights**, so each needs `--allow-writes`, and the previous effect and brightness are restored at the end:
+
+```bash
+python3 scripts/trimlight_doctor.py scenario --list
+```
+
+```bash
+python3 scripts/trimlight_doctor.py scenario brightness-white \
+    --ha-url http://homeassistant.local:8123 --ha-token YOUR_TOKEN \
+    --entity light.front_house --allow-writes
+```
+
+The Home Assistant token is a long-lived access token from your profile page. Credentials are never printed.
+
+---
+
 ## 📝 Disclaimer
 
 This is a personal project, not affiliated with or endorsed by Trimlight. Use it at your own risk. I'm not responsible for anything that goes wrong with your lights, your Home Assistant setup, or anything else. It works great for me — but your mileage may vary. 🤞
