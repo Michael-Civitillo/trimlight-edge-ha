@@ -1,4 +1,5 @@
 """Tests for the Trimlight Edge config flow."""
+import json
 import logging
 import pathlib
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -38,7 +39,13 @@ async def test_user_step_links_to_the_credentials_form(hass):
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["description_placeholders"] == {"apply_url": API_CREDENTIALS_URL}
+    # Asserted as a literal, not against the constant: deriving it from
+    # API_BASE_URL means an edit there would silently retarget a user-facing
+    # link, and a self-referential assertion would stay green.
+    assert result["description_placeholders"] == {
+        "apply_url": "https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply"
+    }
+    assert API_CREDENTIALS_URL == result["description_placeholders"]["apply_url"]
 
 
 def test_translated_strings_contain_no_urls():
@@ -49,11 +56,18 @@ def test_translated_strings_contain_no_urls():
     placeholders instead" after the credentials link was added inline.
     """
     root = pathlib.Path(__file__).parent.parent / "custom_components" / "trimlight"
+    texts = {}
     for name in ("strings.json", "translations/en.json"):
-        text = (root / name).read_text(encoding="utf-8")
-        assert "http://" not in text and "https://" not in text, (
+        texts[name] = (root / name).read_text(encoding="utf-8")
+        assert "http://" not in texts[name] and "https://" not in texts[name], (
             f"{name} contains a URL; pass it as a description placeholder"
         )
+    # hassfest validates strings.json, but a running Home Assistant serves
+    # translations/en.json. Editing one and not the other is silently invisible
+    # in CI, so pin them together.
+    assert json.loads(texts["strings.json"]) == json.loads(
+        texts["translations/en.json"]
+    ), "strings.json and translations/en.json have drifted apart"
 
 
 async def test_user_step_success(hass):

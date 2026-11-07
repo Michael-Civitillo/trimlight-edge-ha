@@ -466,6 +466,12 @@ class TrimlightLight(
         brightness = last.attributes.get(ATTR_BRIGHTNESS)
         if isinstance(brightness, (int, float)):
             self._attr_brightness = int(brightness)
+        # The restore is a fallback, not the truth: anything the controller
+        # reports about what it is running now beats a value saved before the
+        # restart, which may be stale if the lights were changed meanwhile.
+        # _sync_from_data returns early while the detail is stale, so the
+        # restored values still stand in when there is nothing live to use.
+        self._sync_from_data()
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #

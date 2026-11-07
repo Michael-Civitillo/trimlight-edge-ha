@@ -1090,15 +1090,53 @@ async def test_restores_state_after_restart(hass, mock_api):
             )
         ],
     )
+    # Detail is carried forward and flagged stale, which is what happens while
+    # a detail fetch is failing: there is nothing live to contradict the cache.
+    stale = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "_detail_stale": True}
+    }
     await _setup_integration(
-        hass, mock_api,
+        hass, mock_api, coordinator_data=stale,
         entry_id="test_entry_restore",
         unique_id="test_client_id_restore",
     )
+    # With no live detail to contradict it, the restored state stands.
     state = hass.states.get(_entity_id())
     assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
     assert state.attributes.get(ATTR_BRIGHTNESS) == 42
     assert tuple(state.attributes.get(ATTR_HS_COLOR)) == (120.0, 100.0)
+
+
+async def test_device_state_beats_a_stale_restore(hass, mock_api):
+    """What the controller reports now wins over values saved before a restart.
+
+    The lights can be changed from the Trimlight app while Home Assistant is
+    down, so a restored brightness or colour can be simply wrong. The restore
+    is only a fallback for what the controller does not report.
+    """
+    mock_restore_cache(
+        hass,
+        [
+            State(
+                _entity_id(),
+                STATE_ON,
+                {
+                    ATTR_EFFECT: "INDEPENDENCE DAY",
+                    ATTR_HS_COLOR: [240.0, 100.0],
+                    ATTR_BRIGHTNESS: 42,
+                },
+            )
+        ],
+    )
+    await _setup_integration(
+        hass, mock_api,
+        entry_id="test_entry_restore_live",
+        unique_id="test_client_id_restore_live",
+    )
+    state = hass.states.get(_entity_id())
+    # The fixture's controller reports NEW YEAR running at brightness 255.
+    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 255
 
 
 # --------------------------------------------------------------------------- #

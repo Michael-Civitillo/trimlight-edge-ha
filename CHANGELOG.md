@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Selecting an effect immediately shows that effect's own brightness, which the controller adopts, instead of leaving the slider on the previous value for up to 90 seconds
 - A timed-out colour save no longer forgets which effect slot to reuse, so the retry updates the existing "HA Color" effect rather than creating a duplicate. Duplicate effect names are a documented cause of API error 12006. Only an outright rejection from the cloud now invalidates the cached slot
 - The test fixtures now match what controllers really return, notably that `switchState` appears only on the device detail and never in the device list
+- After a restart, what the controller reports now wins over the values Home Assistant saved before it. Lights changed from the Trimlight app while Home Assistant was down no longer show stale brightness or colour. The saved values still stand in while a detail fetch is failing
+- `strings.json` and `translations/en.json` are now pinned together by a test. Hassfest validates the first while a running Home Assistant serves the second, so editing one alone used to pass CI and quietly ship the old wording
 
 ## [1.2.2] - 2026-10-15
 
