@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-11-07
+
+### Fixed
+- A timer whose window ends at midnight now drives the light's on/off state. The API reports that as `24:00`, which was treated as an out-of-range value, so the whole window was discarded and Home Assistant fell back to reporting the light on around the clock. A carried `23:60` means the same instant and is read the same way
+
 ## [1.3.0] - 2026-11-07
 
 ### Changed

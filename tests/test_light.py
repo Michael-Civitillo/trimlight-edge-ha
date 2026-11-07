@@ -160,6 +160,53 @@ def test_time_to_minutes_parses_variants():
     assert _time_to_minutes({"hours": 25, "minutes": 0}) is None
     assert _time_to_minutes({"hours": 10, "minutes": 75}) is None
     assert _time_to_minutes({"hours": -1, "minutes": 0}) is None
+    assert _time_to_minutes({"hours": 24, "minutes": 1}) is None
+
+
+def test_time_to_minutes_reads_midnight_at_the_end_of_the_day():
+    """24:00 is midnight, not a broken value.
+
+    Regression test: the API documents hours as [1, 24], so a timer ending at
+    midnight reports 24:00. Rejecting it threw the whole window away, which
+    left Home Assistant reporting the light on all day.
+    """
+    assert _time_to_minutes({"hours": 24, "minutes": 0}) == 0
+    # A carried 23:60 is the same instant.
+    assert _time_to_minutes({"hours": 23, "minutes": 60}) == 0
+    # Minutes of 60 roll into the next hour the same way.
+    assert _time_to_minutes({"hours": 10, "minutes": 60}) == 11 * 60
+    # And the ordinary values still parse as before.
+    assert _time_to_minutes({"hours": 0, "minutes": 0}) == 0
+    assert _time_to_minutes({"hours": 23, "minutes": 59}) == 23 * 60 + 59
+
+
+def test_timer_window_ending_at_midnight_is_honoured():
+    """An evening schedule ending at 24:00 must drive on/off, not be dropped."""
+    data = {"daily": [_daily_entry((18, 0), (24, 0))]}
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 12, 0)) is False
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 17, 59)) is False
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 18, 0)) is True
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 23, 59)) is True
+    # Midnight is the end of the window, and the end is exclusive.
+    assert _timer_schedule_is_on(data, datetime(2026, 6, 24, 0, 0)) is False
+
+
+async def test_timer_mode_off_outside_a_window_ending_at_midnight(hass, mock_api):
+    """The entity reports off outside an evening window that ends at 24:00.
+
+    Before this, such a window was discarded, so timer mode fell back to
+    reporting the light on around the clock.
+    """
+    data = _timer_device([_daily_entry((18, 0), (24, 0))])
+    with patch(
+        "custom_components.trimlight.light.dt_util.now",
+        return_value=datetime(2026, 6, 24, 12, 0),
+    ):
+        await _setup_integration(
+            hass, mock_api, coordinator_data=data,
+            entry_id="test_entry_midnight", unique_id="test_client_id_midnight",
+        )
+        assert hass.states.get(_entity_id()).state == STATE_OFF
 
 
 def test_now_in_window_same_day():
