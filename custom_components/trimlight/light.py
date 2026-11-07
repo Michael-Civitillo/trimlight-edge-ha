@@ -176,9 +176,16 @@ def _time_to_minutes(obj: Any) -> int | None:
 
     Trimlight time objects use the same shape as the API ``currentDate``
     helper (``hours``/``minutes``). Older/alternate payloads may use
-    ``hour``/``minute``; both are accepted. Returns None for missing or
-    out-of-range values so the caller can fall back to mode-based state
-    instead of treating garbage as a real window.
+    ``hour``/``minute``; both are accepted.
+
+    The API documents the ranges as hours [1, 24] and minutes [1, 60], so a
+    schedule ending at ``24:00`` means midnight, not a broken value. Treating
+    it as out of range threw the whole window away, which left Home Assistant
+    reporting the light on for the entire day whenever a timer ended at
+    midnight. A carried ``23:60`` means the same instant and is read the same
+    way. Returns None for missing or genuinely out-of-range values so the
+    caller can fall back to mode-based state instead of treating garbage as a
+    real window.
     """
     if not isinstance(obj, dict):
         return None
@@ -191,9 +198,17 @@ def _time_to_minutes(obj: Any) -> int | None:
         minutes = int(minutes)
     except (TypeError, ValueError):
         return None
-    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+    if not (0 <= hours <= 24 and 0 <= minutes <= 60):
         return None
-    return hours * 60 + minutes
+    total = hours * 60 + minutes
+    if total == 24 * 60:
+        # Midnight at the end of the day. Expressed as minutes-since-midnight
+        # it is 0, which makes a window like 18:00 -> 24:00 read as wrapping
+        # to the next day, so it stays lit from 18:00 until midnight.
+        return 0
+    if total > 24 * 60:
+        return None
+    return total
 
 
 def _now_in_window(now_minutes: int, start: int, end: int) -> bool:
