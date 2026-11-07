@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-07
+
+### Changed
+- The README and the setup dialog now link to Trimlight's [API credentials application form](https://trimlight.ledhue.com/trimlight/v1/api-credentials/apply), published in their support article [Does the Edge have an open API?](https://trimlight.com/support/does-the-edge-have-an-open-api), so you can obtain a Client ID and Client Secret yourself instead of having to email Trimlight support
+
+### Fixed
+- Setting the brightness back to the value the device last reported (for example 255 → 100 → 255 within one poll interval) now applies on the device. The re-save was skipped whenever the requested brightness matched the effect's cached brightness, which is stale until the next poll, so the device kept the previous value while Home Assistant showed the new one
+- A device whose detail reports its saved effects as `null`, leaves them out, or includes malformed entries no longer breaks the light entity (it failed to be added at all) and no longer blocks picking a color: the list is treated as loaded and empty
+- The light's brightness reflects the device's current effect as soon as the entity is created instead of showing full brightness until the first poll
+- On a host that has been up for less than a minute when the integration loads, the first polls are no longer mistaken for being inside a command cooldown and ignored
+- The setup form trims whitespace or a trailing newline pasted around the Client ID and Client Secret, checks for an already-configured account before contacting the cloud, and logs unexpected validation errors instead of silently reporting "unknown"
+- Timeouts are named in error messages and logs, which used to end in `failed: ` with nothing after the colon
+- Retrying setup with the same Client ID after a failed attempt no longer dead-ends on a dialog reading `already_in_progress`. The duplicate check now runs without claiming the in-progress flow, so a wrong secret can simply be corrected
+- The setup form keeps the Client ID and Client Secret you pasted when it comes back with an error, instead of emptying both fields on every retry
+- Turning the light on from Home Assistant now always powers the controller on. Home Assistant's idea of whether the light was already on comes from a poll up to 30 seconds old, so a plain "turn on" could send nothing at all and leave the lights off while Home Assistant showed them on. Picking an effect or a colour was the only way to actually turn them on
+- The brightness slider no longer replaces a running pattern with solid white. Controllers report the running pattern on `currentEffect` without an id, so the running effect is now identified by its content and re-saved with the new brightness. When it genuinely cannot be identified, the command is refused with an explanation instead of repainting the strip
+- The colour picker now shows the colour the strip is actually displaying, read back from `currentEffect`, instead of whatever Home Assistant last sent. A colour set in the Trimlight app, or one surviving a restart, is no longer silently reapplied from a stale value
+- A timed-out colour save no longer forgets which effect slot to reuse, so the retry updates the existing "HA Color" effect rather than creating a duplicate. Duplicate effect names are a documented cause of API error 12006. Only an outright rejection from the cloud now invalidates the cached slot
+- The test fixtures now match what controllers really return, notably that `switchState` appears only on the device detail and never in the device list
+- After a restart, what the controller reports now wins over the values Home Assistant saved before it. Lights changed from the Trimlight app while Home Assistant was down no longer show stale brightness or colour. The saved values still stand in while a detail fetch is failing
+- Credentials rejected with API error 10002 or 12001 now prompt you to re-enter them, as 10001 already did. Only 10001 was recognised, so a live account answering `12001: Invalid API authentication` was treated as a temporary glitch and retried indefinitely while the integration stayed broken
+- Selecting an effect now shows that effect's brightness straight away. Measured on a real controller, activating an effect applies its stored brightness, but the slider kept the previous value for up to 90 seconds until the optimistic window expired and a poll landed
+- The effect list no longer empties when a controller answers a poll without reporting its saved effects. The last known list is kept, since a controller does not lose its effects spontaneously. An explicitly empty list is still taken at face value, because you may have deleted them all
+- `strings.json` and `translations/en.json` are now pinned together by a test. Hassfest validates the first while a running Home Assistant serves the second, so editing one alone used to pass CI and quietly ship the old wording
+
 ## [1.2.2] - 2026-10-15
 
 ### Fixed

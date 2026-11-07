@@ -119,7 +119,9 @@ class TestRequest:
     async def test_wraps_timeout(self, api):
         api._session.request = AsyncMock(side_effect=TimeoutError())
 
-        with pytest.raises(TrimlightApiError):
+        # str() of a bare TimeoutError is empty; the message must still say
+        # what went wrong rather than ending in "failed: ".
+        with pytest.raises(TrimlightApiError, match="failed: TimeoutError"):
             await api._request("GET", "/some/path")
 
     @pytest.mark.asyncio
@@ -260,6 +262,23 @@ class TestRequest:
             await api._request("POST", "/v1/oauth/resources/device/get")
         assert err.value.code == 12006
         assert "12006" in str(err.value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [10001, 10002, 12001])
+    async def test_every_credential_rejection_raises_auth_error(self, api, code):
+        """Each code meaning "bad credentials" must trigger re-authentication.
+
+        Regression test: only 10001 was recognised, so a live account hitting
+        "API error 12001: Invalid API authentication" was treated as a
+        transient failure and retried forever instead of asking the user for
+        the credentials again.
+        """
+        mock_resp = _mock_response({"code": code, "desc": "auth rejected"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(TrimlightAuthError) as err:
+            await api._request("GET", "/some/path")
+        assert err.value.code == code
 
     @pytest.mark.asyncio
     async def test_auth_error_carries_result_code(self, api):

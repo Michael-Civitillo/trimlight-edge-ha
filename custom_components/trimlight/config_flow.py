@@ -1,6 +1,7 @@
 """Config flow for Trimlight Edge."""
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -14,7 +15,14 @@ from homeassistant.helpers.selector import (
 )
 
 from .api import TrimlightApi, TrimlightApiError, TrimlightAuthError
-from .const import CONF_CLIENT_ID, CONF_CLIENT_SECRET, DOMAIN
+from .const import (
+    API_CREDENTIALS_URL,
+    CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
+    DOMAIN,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 _SECRET_SELECTOR = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
@@ -51,6 +59,7 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
         except TrimlightApiError:
             return "cannot_connect"
         except Exception:
+            _LOGGER.exception("Unexpected error validating Trimlight credentials")
             return "unknown"
         return None
 
@@ -59,24 +68,48 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the initial step: collect clientId and clientSecret."""
         errors: dict[str, str] = {}
+        # Values to put back in the form if it has to be shown again, so a
+        # failed attempt doesn't send the user back to their password manager
+        # for both fields. The secret's selector renders it masked.
+        suggested: dict[str, Any] = {}
 
         if user_input is not None:
-            error = await self._async_validate(
-                user_input[CONF_CLIENT_ID], user_input[CONF_CLIENT_SECRET]
-            )
+            # Credentials are pasted; stray whitespace or a trailing newline
+            # would only show up as a baffling "invalid auth".
+            client_id = user_input[CONF_CLIENT_ID].strip()
+            client_secret = user_input[CONF_CLIENT_SECRET].strip()
+            suggested = {
+                CONF_CLIENT_ID: client_id,
+                CONF_CLIENT_SECRET: client_secret,
+            }
+            # Catch a duplicate account before a round trip to the cloud.
+            #
+            # raise_on_progress=False because this id comes from what the user
+            # typed, not from discovery. With the default, a failed attempt
+            # leaves this flow in progress still holding the id, and the user's
+            # next attempt with the same id aborts on "already_in_progress" —
+            # a reason this integration has no translation for, so the dialog
+            # would show the bare key and dead-end.
+            await self.async_set_unique_id(client_id, raise_on_progress=False)
+            self._abort_if_unique_id_configured()
+            error = await self._async_validate(client_id, client_secret)
             if error is not None:
                 errors["base"] = error
             else:
-                await self.async_set_unique_id(user_input[CONF_CLIENT_ID])
-                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title=f"Trimlight ({user_input[CONF_CLIENT_ID]})",
-                    data=user_input,
+                    title=f"Trimlight ({client_id})",
+                    data={
+                        CONF_CLIENT_ID: client_id,
+                        CONF_CLIENT_SECRET: client_secret,
+                    },
                 )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_SCHEMA,
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_USER_SCHEMA, suggested
+            ),
+            description_placeholders={"apply_url": API_CREDENTIALS_URL},
             errors=errors,
         )
 
@@ -98,14 +131,15 @@ class TrimlightConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="reauth_failed")
 
         if user_input is not None:
+            client_secret = user_input[CONF_CLIENT_SECRET].strip()
             error = await self._async_validate(
-                entry.data[CONF_CLIENT_ID], user_input[CONF_CLIENT_SECRET]
+                entry.data[CONF_CLIENT_ID], client_secret
             )
             if error is not None:
                 errors["base"] = error
             else:
                 self.hass.config_entries.async_update_entry(
-                    entry, data={**entry.data, **user_input}
+                    entry, data={**entry.data, CONF_CLIENT_SECRET: client_secret}
                 )
                 await self.hass.config_entries.async_reload(entry.entry_id)
                 return self.async_abort(reason="reauth_successful")

@@ -47,6 +47,15 @@ class TrimlightAuthError(TrimlightApiError):
     """Raised when the API rejects the client credentials."""
 
 
+def _describe(err: Exception) -> str:
+    """Return a readable description of a transport error.
+
+    ``str()`` of a bare ``TimeoutError`` is empty, which left log lines
+    ending in "failed: " with nothing after the colon.
+    """
+    return str(err) or type(err).__name__
+
+
 def _is_retryable(err: Exception) -> bool:
     """Return True for transient transport errors worth retrying.
 
@@ -143,11 +152,11 @@ class TrimlightApi:
                     last_attempt = attempt == attempts - 1
                     if last_attempt or not _is_retryable(err):
                         raise TrimlightApiError(
-                            f"Request to {path} failed: {err}"
+                            f"Request to {path} failed: {_describe(err)}"
                         ) from err
                     _LOGGER.debug(
                         "Transient error on %s (attempt %d/%d), retrying: %s",
-                        path, attempt + 1, attempts, err,
+                        path, attempt + 1, attempts, _describe(err),
                     )
                 finally:
                     # Stamp even on failure: the server may have processed the

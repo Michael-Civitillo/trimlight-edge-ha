@@ -7,6 +7,12 @@ CONF_CLIENT_SECRET = "client_secret"
 
 API_BASE_URL = "https://trimlight.ledhue.com/trimlight"
 
+# Where users apply for the Client ID and Client Secret this integration
+# needs, per Trimlight's support article "Does the Edge have an open API?".
+# Kept out of strings.json: hassfest rejects URLs in translated strings and
+# requires them to come in as a description placeholder.
+API_CREDENTIALS_URL = f"{API_BASE_URL}/v1/api-credentials/apply"
+
 UPDATE_INTERVAL = 30  # seconds
 
 # Device switch states (from Trimlight V2 API docs section 5).
@@ -24,10 +30,13 @@ SCHEDULE_REPETITION_WEEKEND = 3
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3
 
-# API result codes that mean the client credentials were rejected
-# (invalid clientId / signature per API docs section 2). These trigger a
-# reauth flow instead of being treated as a transient failure.
-API_AUTH_ERROR_CODES = frozenset({10001})
+# API result codes that mean the client credentials were rejected, rather
+# than something transient. These raise the auth error so Home Assistant asks
+# for the credentials again, instead of retrying a request that can never
+# succeed. 10001 and 10002 are the clientId/signature and wrong-password codes
+# from the API documentation; 12001 ("Invalid API authentication") was seen in
+# the wild against a live account.
+API_AUTH_ERROR_CODES = frozenset({10001, 10002, 12001})
 
 # API result code the device detail call returns when the cloud can't parse
 # what the controller has stored ("Device data could not be parsed. Please

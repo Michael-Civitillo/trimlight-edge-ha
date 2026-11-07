@@ -196,7 +196,34 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._handle_detail_recovered(device_id)
 
             merged = {**device, **detail}
-            _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged.keys()))
+            # An explicit list is authoritative, even an empty one: the user
+            # may genuinely have deleted every saved effect.
+            effects = merged.get("effects")
+            if isinstance(effects, list):
+                merged["effects"] = [e for e in effects if isinstance(e, dict)]
+            else:
+                # The payload said nothing about effects. A controller does not
+                # lose its saved effects spontaneously, and this has been seen
+                # to happen on an otherwise successful fetch, so carry the last
+                # known list forward rather than blanking the effect list in
+                # the UI. With nothing to carry, leave the key absent: that is
+                # what stops a color pick creating a duplicate slot blind.
+                carried = previous.get(device_id, {}).get("effects")
+                if isinstance(carried, list) and carried:
+                    merged["effects"] = carried
+                    merged["_effects_carried"] = True
+                    _LOGGER.debug(
+                        "Device %s reported no effects list; keeping the last"
+                        " known %d effect(s)",
+                        device_id,
+                        len(carried),
+                    )
+                else:
+                    # Drop the key entirely rather than leaving a null behind.
+                    # Its absence is the signal that no effect list has ever
+                    # loaded, which is what blocks a blind color-slot create.
+                    merged.pop("effects", None)
+            _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged))
             _LOGGER.debug(
                 "Device %s switchState=%s daily=%s calendar=%s",
                 device_id,
