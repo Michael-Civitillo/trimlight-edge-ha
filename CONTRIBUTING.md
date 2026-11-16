@@ -39,7 +39,7 @@ pytest tests/ --cov=custom_components/trimlight --cov-report=term-missing
 Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.yml). Include:
 - Your HA version
 - Integration version
-- Relevant logs (enable debug logging: add `trimlight: debug` under `logger > logs` in `configuration.yaml`)
+- Relevant logs (enable debug logging: add `custom_components.trimlight: debug` under `logger > logs` in `configuration.yaml`, or use **Enable debug logging** on the integration's page)
 
 ## Requesting Features
 
