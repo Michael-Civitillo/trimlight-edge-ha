@@ -32,6 +32,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import TrimlightApiError
 from .const import (
+    COMBINED_EFFECT_ID,
     DOMAIN,
     EFFECT_CATEGORY_BUILTIN,
     EFFECT_CATEGORY_CUSTOM,
@@ -394,8 +395,15 @@ def _scheduled_effect_ids(data: dict[str, Any], now: datetime) -> list[Any]:
     range is left out, since a pattern scheduled for another season is a poor
     guess, and within each tier calendar events come before daily entries
     because an event covering today's date is the more specific of the two.
+
+    An entry running the combined effect names no saved effect, so it stands
+    for the effects in that rotation, in the order the device plays them.
     """
     now_minutes = now.hour * 60 + now.minute
+    combined = data.get("combinedEffect")
+    rotation = combined.get("effectIds") if isinstance(combined, dict) else None
+    if not isinstance(rotation, list):
+        rotation = []
     lit_now: list[Any] = []
     runs_today: list[Any] = []
     other_days: list[Any] = []
@@ -412,12 +420,13 @@ def _scheduled_effect_ids(data: dict[str, Any], now: datetime) -> list[Any]:
             effect_id = entry.get("effectId")
             if effect_id is None:
                 continue
+            effect_ids = rotation if effect_id == COMBINED_EFFECT_ID else [effect_id]
             if _entry_vote(entry, now, now_minutes, applies):
-                lit_now.append(effect_id)
+                lit_now.extend(effect_ids)
             elif applies(entry, now):
-                runs_today.append(effect_id)
+                runs_today.extend(effect_ids)
             elif source == "daily":
-                other_days.append(effect_id)
+                other_days.extend(effect_ids)
     return [*lit_now, *runs_today, *other_days]
 
 
@@ -1111,11 +1120,14 @@ class TrimlightLight(
         device's persisted switchState, so it must be set explicitly here or
         the device keeps reporting itself as off.
 
-        This alone is not a turn-on. Some controllers resume the pattern they
-        were last showing when switched to MANUAL, but one has been seen to
-        leave the strip dark, with the cloud answering success, until an
-        effect was activated. The caller therefore follows this with a
-        view_effect whenever it knows what to show.
+        This alone is not a turn-on. The API documents it only as setting the
+        switch state (section 5) and says nothing about what the controller
+        then displays; showing a saved effect is a command of its own, "Check
+        out effect" (section 13, view_effect here). Some controllers do resume
+        the pattern they were last showing, but one has been seen to leave the
+        strip dark, with the cloud answering success, until an effect was
+        activated. The caller therefore follows this with a view_effect
+        whenever it knows what to show.
         """
         await self.coordinator.api.set_switch_state(
             self._device_id, SWITCH_STATE_MANUAL

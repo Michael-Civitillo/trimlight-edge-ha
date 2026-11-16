@@ -26,6 +26,13 @@ SCHEDULE_REPETITION_EVERYDAY = 1
 SCHEDULE_REPETITION_WEEKDAYS = 2
 SCHEDULE_REPETITION_WEEKEND = 3
 
+# The effect id a schedule entry carries when it runs the device's "combined
+# effect", a rotation through up to five saved effects, rather than one saved
+# effect (API docs section 16: "The combined effect id is fixed at 200"). The
+# effects in the rotation are listed under ``combinedEffect.effectIds`` in the
+# device detail.
+COMBINED_EFFECT_ID = 200
+
 # API minimum delay between requests (seconds).
 # The Trimlight cloud server returns error 20000 on rapid requests.
 API_REQUEST_MIN_INTERVAL = 0.3

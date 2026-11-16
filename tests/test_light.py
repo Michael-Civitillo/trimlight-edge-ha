@@ -1594,6 +1594,29 @@ def test_scheduled_effect_ids_survive_malformed_schedules():
     assert _scheduled_effect_ids(data, _MONDAY) == []
 
 
+def test_scheduled_effect_ids_expand_the_combined_effect():
+    """A schedule running the combined effect stands for the effects in it.
+
+    The API fixes the combined effect's id at 200 (docs section 16). It is a
+    rotation through saved effects, not a saved effect itself, so the id on
+    its own would match nothing and the schedule would be passed over.
+    """
+    rotating = {**_daily_entry((18, 0), (23, 0)), "effectId": 200}
+    single = {**_daily_entry((21, 0), (23, 0)), "effectId": 6}
+    data = {
+        "daily": [single, rotating],
+        "combinedEffect": {"effectIds": [4, 2, 9], "interval": 5},
+    }
+    # The rotation is lit at 20:00, so its effects lead, in playing order.
+    assert _scheduled_effect_ids(data, _MONDAY) == [4, 2, 9, 6]
+    # With nothing saying what the rotation holds, the entry contributes
+    # nothing rather than an id that names no effect.
+    for combined in (None, {}, {"effectIds": None}):
+        assert _scheduled_effect_ids(
+            {"daily": [single, rotating], "combinedEffect": combined}, _MONDAY
+        ) == [6]
+
+
 async def test_turn_on_with_unknown_effect_uses_the_timer_schedule(hass, mock_api):
     """When HA has no idea what was showing, the timer's effect is shown.
 
@@ -1619,6 +1642,30 @@ async def test_turn_on_with_unknown_effect_uses_the_timer_schedule(hass, mock_ap
     state = hass.states.get(_entity_id())
     assert state.state == STATE_ON
     # HA now knows what is showing, so it can show it and act on it.
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_turn_on_with_unknown_effect_uses_the_scheduled_rotation(
+    hass, mock_api
+):
+    """A timer running the combined effect still decides what turn-on shows.
+
+    The schedule names id 200, the rotation, which is not a saved effect. The
+    first effect in the rotation that Home Assistant can name is shown, here
+    skipping an id the device no longer has.
+    """
+    data = _unidentified_device(
+        daily=[{**_daily_entry((18, 0), (23, 0)), "effectId": 200}],
+        combinedEffect={"effectIds": [41, 2, 1], "interval": 5},
+    )
+    await _setup_integration(
+        hass, mock_api, coordinator_data=data,
+        entry_id="test_entry_rotation_fx", unique_id="test_client_id_rotation_fx",
+    )
+    await _turn_on(hass)
+
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 2)
+    state = hass.states.get(_entity_id())
     assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
 
 
