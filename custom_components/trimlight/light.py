@@ -504,6 +504,15 @@ class TrimlightLight(
         # is still below the cooldown length.
         self._last_command_time: float | None = None
         self._color_effect_id: int | None = None
+        # time.monotonic() of the last save of the colour slot, or None. A slot
+        # this recent may not be in the polled effects list yet; an older one
+        # that is missing from the list has been deleted.
+        self._color_slot_saved_at: float | None = None
+        # True after a plain turn-on whose re-activation failed. The power-on
+        # landed, so HA shows the light on, but nothing confirmed that the
+        # strip was told what to show, so the next turn-on does not trust that
+        # "on" and tries again.
+        self._reactivation_owed = False
         # Serializes this entity's commands: the check-then-act on the cached
         # color slot id would otherwise race when e.g. dragging the color
         # wheel fires several service calls, creating duplicate effects.
@@ -616,9 +625,30 @@ class TrimlightLight(
         effect = self._effect_by_name(name)
         if effect is not None and effect.get("id") is not None:
             return effect
-        if name == HA_COLOR_EFFECT_NAME and self._color_effect_id is not None:
+        if (
+            name == HA_COLOR_EFFECT_NAME
+            and self._color_effect_id is not None
+            and self._color_slot_may_be_unlisted()
+        ):
             return {"id": self._color_effect_id, "name": name}
         return None
+
+    def _color_slot_may_be_unlisted(self) -> bool:
+        """Return True while a colour slot missing from the list may still exist.
+
+        The slot is absent from the polled list for a while after it is first
+        saved, and then the cached id is the only handle on it. Past the window
+        in which HA's own commands outrank polled data, a list without the slot
+        means it was deleted in the Trimlight app, and asking the controller
+        for it would only fail on every turn-on. A list that never loaded
+        cannot say either way, so the cached id stands.
+        """
+        if "effects" not in self._data:
+            return True
+        return (
+            self._color_slot_saved_at is not None
+            and time.monotonic() - self._color_slot_saved_at <= _COMMAND_COOLDOWN
+        )
 
     def _fallback_effect(self) -> tuple[dict[str, Any], str] | None:
         """Pick an effect to show when HA has no idea what was showing last.
@@ -627,9 +657,18 @@ class TrimlightLight(
         no saved effect HA can name. The timer schedule comes first because it
         is the one place the device itself says which pattern these lights are
         meant to show; the first saved effect is only better than a dark strip.
+
+        The colour slot is never a candidate. HA may hold a different colour
+        from the one the slot stores, and the next brightness change would
+        re-save the slot with HA's, repainting the strip a colour nobody
+        picked.
         """
         usable = [
-            e for e in self._effects if e.get("id") is not None and e.get("name")
+            e
+            for e in self._effects
+            if e.get("id") is not None
+            and e.get("name")
+            and e["name"] != HA_COLOR_EFFECT_NAME
         ]
         if not usable:
             return None
@@ -639,20 +678,19 @@ class TrimlightLight(
                 return scheduled, "its timer schedule"
         return usable[0], "its saved effects (the first one)"
 
-    def _effect_to_resume(self) -> dict[str, Any] | None:
-        """Return the effect to show when a turn-on names neither effect nor colour.
+    def _effect_to_resume(self, turning_on: bool) -> dict[str, Any] | None:
+        """Return the effect to act on when a turn-on names no effect or colour.
 
-        The effect HA believes the strip is showing is re-activated as is. When
-        HA does not know, an effect is chosen only for a light that is off: one
-        that is on is showing something HA cannot name (a pattern played from
-        the Trimlight app, say), and choosing for it would replace that.
-
-        Reads ``_attr_is_on``, so it must run before the optimistic write.
+        That is the effect HA believes the strip was showing. When HA does not
+        know, one is chosen only for a light that is being turned on: a light
+        that is already on is showing something HA cannot name (a pattern
+        played from the Trimlight app, say), and choosing for it would replace
+        that.
         """
         known = self._known_effect()
         if known is not None:
             return known
-        if self._attr_is_on:
+        if not turning_on:
             return None
         fallback = self._fallback_effect()
         if fallback is None:
@@ -803,9 +841,10 @@ class TrimlightLight(
         """Turn on the light.
 
         Supports:
-          - Plain toggle:   powers on, then re-activates the effect the strip
-            was last showing, so the controller is told what to display
-            instead of being trusted to resume it
+          - Plain toggle:   powers on and, when the light was off, re-activates
+            the effect the strip was last showing, so the controller is told
+            what to display instead of being trusted to resume it. A light HA
+            already shows as on is only sent the power-on
           - ATTR_EFFECT:    activates the named saved effect
           - ATTR_HS_COLOR:  saves a solid static color effect then activates it
           - ATTR_BRIGHTNESS: re-saves whatever is showing (named effect or the
@@ -842,12 +881,18 @@ class TrimlightLight(
                 hs_color = None
 
         async with self._command_lock:
+            # Whether this is a real turn-on rather than a command to a light
+            # that is already lit. Worked out inside the lock so it sees what a
+            # command queued ahead of this one settled on, and before the
+            # optimistic write below, which hides whether the light was off.
+            # A light whose state is unknown counts as off, and so does an
+            # "on" left behind by a turn-on that could not re-activate
+            # anything.
+            turning_on = not self._attr_is_on or self._reactivation_owed
+            brightness_problem: str | None = None
             if effect is None and hs_color is None:
                 # A plain turn-on, or brightness alone: nothing says what the
-                # strip should show, so work that out here. It happens inside
-                # the lock so it sees what a command queued ahead of this one
-                # settled on, and before the optimistic write below, which
-                # hides whether the light was off.
+                # strip should show, so work that out here.
                 if (
                     brightness is not None
                     and self._active_effect_name == HA_COLOR_EFFECT_NAME
@@ -856,12 +901,21 @@ class TrimlightLight(
                     # rather than from the polled copy of the slot, which lags
                     # a colour change by up to one poll.
                     hs_color = self._attr_hs_color or (0.0, 0.0)
-                else:
-                    effect = self._effect_to_resume()
+                elif brightness is not None or turning_on:
+                    effect = self._effect_to_resume(turning_on)
                     if effect is None and brightness is not None:
-                        raise ServiceValidationError(
-                            self._unknown_effect_problem()
-                        )
+                        brightness_problem = self._unknown_effect_problem()
+                        if not turning_on:
+                            raise ServiceValidationError(brightness_problem)
+                        # Nothing to apply the brightness to, but the light is
+                        # off: still power it on, as a plain turn-on would,
+                        # and report the brightness afterwards.
+                        brightness = None
+                # Otherwise a plain turn-on of a light that is already on. It
+                # gets the power-on alone, as before: re-activating the effect
+                # HA remembers could replace a pattern started from the
+                # Trimlight app, restart an animation, or undo a brightness set
+                # outside HA.
 
             snapshot = self._state_snapshot()
 
@@ -885,11 +939,10 @@ class TrimlightLight(
                 # persisted, which would override an effect or colour activated
                 # beforehand.
                 await self._power_on()
-                # Every branch below ends by activating an effect. Switching to
+                # A turn-on then ends by activating an effect. Switching to
                 # MANUAL is not enough on its own: the cloud accepts it, but a
                 # controller has been seen to leave the strip dark until an
-                # effect was activated. Only a light that is already on with a
-                # pattern HA cannot name is left to the power-on alone.
+                # effect was activated.
                 if plain:
                     if effect is not None:
                         await self._resume(effect)
@@ -907,6 +960,16 @@ class TrimlightLight(
                 raise HomeAssistantError(
                     f"Failed to turn on {self.entity_id}: {err}"
                 ) from err
+
+            if brightness_problem is not None:
+                # The power-on went out, but the call asked for a brightness
+                # that could not be applied. Fail it like any other command
+                # that only partly landed, so the next poll re-syncs.
+                self._restore_snapshot(snapshot)
+                raise HomeAssistantError(
+                    f"Turned on {self.entity_id}, but could not set its"
+                    f" brightness. {brightness_problem}"
+                )
 
             # Republish state: the command helpers update _active_effect_name
             # after the optimistic write above, so without this the effect
@@ -969,29 +1032,27 @@ class TrimlightLight(
             payload["brightness"] = brightness
             result = await api.save_effect(self._device_id, payload)
             effect_id = (result or {}).get("id", effect_id)
-        try:
-            await api.view_effect(self._device_id, effect_id)
-        except TrimlightApiError as err:
-            if (
-                brightness is None
-                and err.code is not None
-                and effect_id == self._color_effect_id
-            ):
-                # The cloud refused to show the colour slot, so the cached id
-                # may be stale (the effect was deleted in the Trimlight app).
-                # Drop it, as a refused save does in _set_color, or every
-                # turn-on would keep asking for an effect that is gone. Not
-                # after a re-save, though: that just proved the slot exists.
-                self._color_effect_id = None
-            raise
+        await api.view_effect(self._device_id, effect_id)
+        switched = effect.get("name") != self._active_effect_name
         self._active_effect_name = effect.get("name")
-        if brightness is None and isinstance(effect.get("brightness"), int):
+        self._reactivation_owed = False
+        if (
+            brightness is None
+            and switched
+            and isinstance(effect.get("brightness"), int)
+        ):
             # A controller adopts the effect's own stored brightness when the
             # effect is activated, measured once both the cloud shadow and the
             # entity had settled. Publish it now: otherwise the slider shows
             # the previous value until the optimistic window expires and a poll
             # lands, up to about 90s. A wrong guess self-corrects on that poll,
             # since the brightness otherwise comes from currentEffect.
+            #
+            # Only when the effect changed, though. For the effect HA already
+            # had, its own brightness is the fresher one: the stored copy read
+            # here comes from the last poll, so it predates a brightness HA set
+            # since, and publishing it would show (and later re-send) a value
+            # the user had already changed.
             self._attr_brightness = effect["brightness"]
 
     async def _resume(self, effect: dict[str, Any]) -> None:
@@ -1002,15 +1063,20 @@ class TrimlightLight(
         on its own is lit regardless. A refusal or a timeout here must not
         turn a turn-on that worked into one that failed: an effect deleted in
         the Trimlight app since the last poll, or a cloud that cannot read the
-        controller's data, would otherwise break turning on altogether. The
-        warning leaves a trace for the controllers that do need this step.
+        controller's data, would otherwise break turning on altogether.
+
+        HA then shows the light on without knowing the strip was told what to
+        show, so the next turn-on is made to try again rather than treat that
+        "on" as settled. The warning leaves a trace in the meantime.
         """
         try:
             await self._activate_effect(effect)
         except TrimlightApiError as err:
+            self._reactivation_owed = True
             _LOGGER.warning(
                 "Turned on %s, but could not re-activate '%s': %s. If the"
-                " lights stayed dark, pick an effect or a colour",
+                " lights stayed dark, turn them on again, or pick an effect"
+                " or a colour",
                 self._device_id,
                 effect.get("name"),
                 err,
@@ -1103,6 +1169,7 @@ class TrimlightLight(
                 f"save_effect returned invalid id: {saved_id}"
             )
         self._color_effect_id = saved_id
+        self._color_slot_saved_at = time.monotonic()
 
         # Always re-activate the slot after saving. Re-saving the "HA Color"
         # effect updates the stored values but does not make the controller
@@ -1112,6 +1179,7 @@ class TrimlightLight(
         await api.view_effect(self._device_id, saved_id)
         self._active_effect_name = HA_COLOR_EFFECT_NAME
         self._attr_hs_color = hs
+        self._reactivation_owed = False
 
     async def _power_on(self) -> None:
         """Power the device on (manual mode).
@@ -1126,8 +1194,8 @@ class TrimlightLight(
         out effect" (section 13, view_effect here). Some controllers do resume
         the pattern they were last showing, but one has been seen to leave the
         strip dark, with the cloud answering success, until an effect was
-        activated. The caller therefore follows this with a view_effect
-        whenever it knows what to show.
+        activated. A turn-on of a light that was off therefore follows this
+        with a view_effect whenever it knows what to show.
         """
         await self.coordinator.api.set_switch_state(
             self._device_id, SWITCH_STATE_MANUAL

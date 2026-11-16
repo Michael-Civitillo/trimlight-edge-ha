@@ -305,7 +305,10 @@ class TestRequest:
 
         The cloud answers success for commands that change nothing visible, so
         the only way to tell that from a command never being sent is a record
-        of what went out and how it was answered. It must not leak the secret.
+        of what went out and how it was answered. Logs get pasted into bug
+        reports, so the record must carry none of the request's credentials:
+        not the secret, and not the headers either, which hold the client id
+        and a token signed with the secret.
         """
         mock_resp = _mock_response({"code": 0, "desc": "success"})
         api._session.request = AsyncMock(return_value=mock_resp)
@@ -316,7 +319,13 @@ class TestRequest:
         assert "/v1/oauth/resources/device/effect/view" in caplog.text
         assert "'id': 7" in caplog.text
         assert "code 0 (success)" in caplog.text
+
+        sent_headers = api._session.request.call_args.kwargs["headers"]
+        assert sent_headers["authorization"] not in caplog.text
         assert "my_secret" not in caplog.text
+        assert "my_client" not in caplog.text
+        for header_name in sent_headers:
+            assert header_name.lower() not in caplog.text.lower()
 
 
 class TestCurrentDate:
