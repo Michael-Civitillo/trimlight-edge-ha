@@ -225,9 +225,10 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     merged.pop("effects", None)
             _LOGGER.debug("Device %s merged data keys: %s", device_id, list(merged))
             _LOGGER.debug(
-                "Device %s switchState=%s daily=%s calendar=%s",
+                "Device %s switchState=%s currentEffect=%s daily=%s calendar=%s",
                 device_id,
                 merged.get("switchState"),
+                merged.get("currentEffect"),
                 merged.get("daily"),
                 merged.get("calendar"),
             )

@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import logging
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -297,6 +298,25 @@ class TestRequest:
         with pytest.raises(TrimlightApiError) as err:
             await api._request("GET", "/some/path")
         assert err.value.code is None
+
+    @pytest.mark.asyncio
+    async def test_debug_log_traces_the_command_and_its_answer(self, api, caplog):
+        """A command the cloud accepts but the lights ignore must be traceable.
+
+        The cloud answers success for commands that change nothing visible, so
+        the only way to tell that from a command never being sent is a record
+        of what went out and how it was answered. It must not leak the secret.
+        """
+        mock_resp = _mock_response({"code": 0, "desc": "success"})
+        api._session.request = AsyncMock(return_value=mock_resp)
+
+        with caplog.at_level(logging.DEBUG, logger="custom_components.trimlight.api"):
+            await api.view_effect("device_123", 7)
+
+        assert "/v1/oauth/resources/device/effect/view" in caplog.text
+        assert "'id': 7" in caplog.text
+        assert "code 0 (success)" in caplog.text
+        assert "my_secret" not in caplog.text
 
 
 class TestCurrentDate:

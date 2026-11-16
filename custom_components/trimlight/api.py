@@ -172,6 +172,13 @@ class TrimlightApi:
         if not isinstance(result, dict):
             raise TrimlightApiError(f"Unexpected response from {path}: {result!r}")
         code = result.get("code")
+        # The cloud can answer a command with success while the controller does
+        # nothing visible, so a trace of what was sent, and how it was answered,
+        # is the only way to tell that apart from a command never being sent.
+        # The body carries no credentials: those travel in the headers.
+        _LOGGER.debug(
+            "%s %s %s -> code %s (%s)", method, path, data, code, result.get("desc")
+        )
         if code in API_AUTH_ERROR_CODES:
             raise TrimlightAuthError(
                 f"API auth error {code}: {result.get('desc', 'unknown')}",
