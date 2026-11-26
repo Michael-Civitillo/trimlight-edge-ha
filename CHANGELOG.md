@@ -5,10 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.0] - 2026-11-16
+## [1.4.0] - 2026-11-26
 
 ### Fixed
-- Turning a light on from off now lights the strip. A plain "turn on" only switched the controller to manual mode and trusted it to bring back its last pattern. Some controllers do, but on others the cloud accepts the command, Home Assistant shows the light on, and the strip stays dark until you pick an effect or a colour. Turning on from off now ends the same way picking an effect does, by telling the controller which effect to show: the one it was last showing. A light Home Assistant already shows as on is still only sent the power-on, so nothing that is running gets restarted or replaced
+- Turning a light on from off now lights the strip. A plain "turn on" only switched the controller to manual mode and trusted it to bring back its last pattern. Some controllers do, but on others the cloud accepts the command, Home Assistant shows the light on, and the strip stays dark until you pick an effect or a colour. Turning on from off now ends the same way picking an effect does, by telling the controller which effect to show: the one it was last showing. A light that is already on in manual mode is still only sent the power-on, so nothing that is running gets restarted or replaced
+- Turning on a light that its Trimlight timer already has lit no longer risks leaving it dark. The power-on takes the controller off its timer, which is a change of mode just as turning on from off is, so the effect the controller reports running is shown again afterwards
 - When Home Assistant does not know what a light was last showing, turning it on from off no longer leaves it dark, and dragging its brightness slider is no longer refused. An effect is picked for it: the one the controller's timer schedule uses today if it has one (the first in the rotation, when the schedule cycles through several), otherwise the first saved effect, and never the "HA Color" slot. The effect shows in Home Assistant straight away so you can change it. A light that is already on with a pattern Home Assistant cannot identify is left as it is
 - Home Assistant no longer forgets a light's effect, colour and brightness when it restarts while the light is off. It keeps none of these for a light that is off, so a restart during the day, when outdoor lights usually are off, forgot the effect: the next turn-on had nothing to bring back, and changing only the brightness was refused until you picked an effect again
 - Changing only the brightness no longer repaints the strip a solid colour when the effect Home Assistant remembered has since been deleted or renamed in the Trimlight app. The change is refused with an explanation, as it already was when the effect had never been known
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Turning a light on from off shows the effect Home Assistant has for it. If you start a pattern from the Trimlight app that is not one of your saved effects, Home Assistant cannot identify it, and the next time it turns the light on from off it brings back the last effect it knew. Saving the pattern as an effect in the Trimlight app is what lets Home Assistant recognise it
+- When Home Assistant turns a light on from off, or takes it off its timer, it shows one saved effect. If the controller was rotating through several effects, the rotation does not carry on until it is started again from the Trimlight app or by the timer
 - Debug logging now records every command sent to the Trimlight cloud with the result code it answered, and the `currentEffect` each poll returned, so "Home Assistant says on but the lights are dark" can be traced from the log
 
 ## [1.3.1] - 2026-11-07
