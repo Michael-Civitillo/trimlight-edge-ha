@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -196,6 +197,12 @@ class TrimlightCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._handle_detail_recovered(device_id)
 
             merged = {**device, **detail}
+            # When this device's detail was fetched, as time.monotonic(). The
+            # update reaches the entities only once every device has been
+            # fetched, which can be many seconds later when another device's
+            # fetch keeps timing out, and the light entity needs to know how
+            # old the effects list really is.
+            merged["_fetched_at"] = time.monotonic()
             # An explicit list is authoritative, even an empty one: the user
             # may genuinely have deleted every saved effect.
             effects = merged.get("effects")

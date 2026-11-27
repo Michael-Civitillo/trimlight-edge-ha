@@ -88,6 +88,25 @@ async def test_merges_list_and_detail(coordinator):
     assert data[DEVICE_ID]["effects"][0]["name"] == "NEW YEAR"
 
 
+async def test_detail_is_stamped_with_when_it_was_fetched(coordinator, api):
+    """Each device's detail carries the time it was fetched, not delivered.
+
+    The update reaches the light only after every device has been fetched,
+    which can be much later when another device's fetch keeps timing out, and
+    the light judges how old an effects list is from this stamp.
+    """
+    # Patch the coordinator's own reference to the module, not the shared
+    # time.monotonic the event loop runs on.
+    with patch("custom_components.trimlight.coordinator.time") as time_mock:
+        time_mock.monotonic.side_effect = [100.0, 200.0]
+        api.get_devices = AsyncMock(
+            return_value=[dict(LIST_ENTRY), {**LIST_ENTRY, "deviceId": "dev2"}]
+        )
+        data = await coordinator._async_update_data()
+    assert data[DEVICE_ID]["_fetched_at"] == 100.0
+    assert data["dev2"]["_fetched_at"] == 200.0
+
+
 async def test_effects_list_is_normalised(coordinator, api):
     """Only an explicit list is taken as the device's saved effects.
 
