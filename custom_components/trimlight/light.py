@@ -118,7 +118,6 @@ class _OwnSave(NamedTuple):
 
     brightness: int
     saved_at: float  # time.monotonic()
-    effects: Any  # The polled effects list as it stood at the time.
 
 
 def _api_color_to_hs(color: int) -> tuple[float, float]:
@@ -516,6 +515,10 @@ class TrimlightLight(
         # effects list lags a save, so until a list fetched after the save
         # arrives these are the newer record of what the controller stores.
         self._own_saves: dict[Any, _OwnSave] = {}
+        # The effects list as of the last coordinator update, to tell a list
+        # that has just arrived from one delivered again unchanged (a failed
+        # refresh notifies the entity with the data it already had).
+        self._effects_seen: Any = self._data.get("effects")
         # time.monotonic() of a turn-on that powered the controller on without
         # managing to show anything, or None. HA shows the light on after it,
         # but nothing confirmed the strip was told what to show, so for a
@@ -646,33 +649,46 @@ class TrimlightLight(
 
     def _note_own_save(self, brightness: int, *effect_ids: Any) -> None:
         """Record what HA has just saved to the controller for an effect."""
-        save = _OwnSave(brightness, time.monotonic(), self._data.get("effects"))
+        save = _OwnSave(brightness, time.monotonic())
         for effect_id in effect_ids:
             self._own_saves[effect_id] = save
 
     def _own_save(self, effect_id: Any) -> _OwnSave | None:
         """Return HA's own save of an effect while it is the newest record of it.
 
-        It stops being that once the polled effects list has been fetched
-        afresh since the save: a different list from the one held at the time,
-        not one carried over from an earlier poll, and not one fetched inside
-        the window in which the cloud may still be catching up with the save.
+        ``_expire_own_saves`` drops it once a list fetched afresh has arrived.
         """
-        save = self._own_saves.get(effect_id)
-        if save is None:
-            return None
+        return self._own_saves.get(effect_id)
+
+    def _expire_own_saves(self) -> None:
+        """Forget HA's own saves that a newly arrived effects list supersedes.
+
+        Run as each coordinator update arrives, so what counts is when a list
+        was fetched, not when it is next looked at. A list counts only if it is
+        new (not one delivered again unchanged), fetched afresh (not carried
+        over from an earlier poll, nor left from before a failing detail
+        fetch), and fetched after the window in which the cloud may still be
+        catching up with a save. Such a list supersedes every save made before
+        that window, and keeps having done so even if a carried-over list is
+        all a later poll brings.
+        """
         data = self._data
         effects = data.get("effects")
+        if effects is self._effects_seen:
+            return
+        self._effects_seen = effects
         if (
-            isinstance(effects, list)
-            and effects is not save.effects
-            and not data.get("_detail_stale")
-            and not data.get("_effects_carried")
-            and time.monotonic() - save.saved_at > _COMMAND_COOLDOWN
+            not isinstance(effects, list)
+            or data.get("_detail_stale")
+            or data.get("_effects_carried")
         ):
-            del self._own_saves[effect_id]
-            return None
-        return save
+            return
+        now = time.monotonic()
+        self._own_saves = {
+            effect_id: save
+            for effect_id, save in self._own_saves.items()
+            if now - save.saved_at <= _COMMAND_COOLDOWN
+        }
 
     def _fallback_effect(self) -> tuple[dict[str, Any], str] | None:
         """Pick an effect to show when HA has no idea what was showing last.
@@ -883,6 +899,7 @@ class TrimlightLight(
 
     def _handle_coordinator_update(self) -> None:
         """Sync state from coordinator, respecting the optimistic cooldown."""
+        self._expire_own_saves()
         if not self._in_cooldown():
             self._sync_from_data()
         self.async_write_ha_state()
@@ -1004,9 +1021,6 @@ class TrimlightLight(
             self.async_write_ha_state()
 
             powered = False
-            # Whether a best-effort re-activation was tried, and whether
-            # anything at all ended up being shown.
-            attempted = False
             shown = False
             try:
                 # Always power on first, even when HA already believes the
@@ -1024,7 +1038,6 @@ class TrimlightLight(
                 # effect was activated.
                 if plain:
                     if effect is not None:
-                        attempted = True
                         shown = await self._resume(effect)
                 elif effect is not None:
                     await self._activate_effect(effect, brightness)
@@ -1045,18 +1058,17 @@ class TrimlightLight(
                     f"Failed to turn on {self.entity_id}: {err}"
                 ) from err
 
-            if not shown and (turning_on or attempted):
+            if not shown and (turning_on or on_timer):
                 # The controller was powered on, or taken off its timer,
                 # without the strip being told what to show. HA shows it on all
                 # the same, so leave a note for the next turn-on.
                 self._reactivation_owed_since = time.monotonic()
 
             if brightness_problem is not None:
-                # The power-on landed, so the light is on, but the call asked
-                # for a brightness that could not be applied. Report that, and
-                # drop the cooldown so the next poll re-syncs straight away.
-                self._last_command_time = None
-                self.async_write_ha_state()
+                # The power-on landed, so the light is on, and HA holds that
+                # like after any other command that landed: a poll that has not
+                # caught up yet must not show it off again. Only the brightness
+                # asked for could not be applied, which the call reports.
                 raise HomeAssistantError(
                     f"Turned on {self.entity_id}, but could not set its"
                     f" brightness. {brightness_problem}"

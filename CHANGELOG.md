@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.0] - 2026-11-26
+## [1.4.0] - 2026-11-27
 
 ### Fixed
 - Turning a light on from off now lights the strip. A plain "turn on" only switched the controller to manual mode and trusted it to bring back its last pattern. Some controllers do, but on others the cloud accepts the command, Home Assistant shows the light on, and the strip stays dark until you pick an effect or a colour. Turning on from off now ends the same way picking an effect does, by telling the controller which effect to show: the one it was last showing. A light that is already on in manual mode is still only sent the power-on, so nothing that is running gets restarted or replaced
