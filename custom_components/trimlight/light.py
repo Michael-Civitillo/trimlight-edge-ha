@@ -30,7 +30,7 @@ from homeassistant.helpers.restore_state import (
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .api import TrimlightApiError
+from .api import TrimlightApiError, TrimlightAuthError
 from .const import (
     COMBINED_EFFECT_ID,
     DOMAIN,
@@ -505,6 +505,11 @@ class TrimlightLight(
         self._device_id = device_id
         self._attr_unique_id = device_id
         self._active_effect_name: str | None = None
+        # The effect a light that was off when HA last restarted had been
+        # showing. Used only to bring that effect back when HA turns the light
+        # on from off: unlike ``_active_effect_name`` it is not a claim about
+        # what the strip shows, so nothing else acts on it.
+        self._remembered_effect_name: str | None = None
         # time.monotonic() of the last command, or None while no command's
         # optimistic state is being held. A 0.0 sentinel would read as a live
         # cooldown on a host whose monotonic clock (usually time since boot)
@@ -572,23 +577,28 @@ class TrimlightLight(
 
         Home Assistant stores no effect, colour or brightness for a light that
         is off, so restarting while the lights were off (most of the day, for
-        outdoor lighting) forgot the effect. A turn-on then had nothing to
-        re-activate, and brightness alone was refused until an effect was
-        picked again.
+        outdoor lighting) forgot the effect, and a turn-on then had nothing to
+        bring back.
         """
         return RestoredExtraData(
             {
-                "effect": self._active_effect_name,
+                "effect": self._active_effect_name or self._remembered_effect_name,
                 "hs_color": list(self._attr_hs_color),
                 "brightness": self._attr_brightness,
             }
         )
 
     def _restore_remembered(self, data: dict[str, Any]) -> None:
-        """Take back what ``extra_restore_state_data`` saved before a restart."""
+        """Take back what ``extra_restore_state_data`` saved before a restart.
+
+        The effect is kept only as the one to bring back when HA turns the
+        light on from off. Taking it as the effect on the strip would be a
+        guess once the light has been lit some other way, and a brightness
+        change would then re-save it over whatever the strip is showing.
+        """
         effect = data.get("effect")
         if isinstance(effect, str) and effect:
-            self._active_effect_name = effect
+            self._remembered_effect_name = effect
         hs_color = data.get("hs_color")
         if (
             isinstance(hs_color, (list, tuple))
@@ -702,6 +712,9 @@ class TrimlightLight(
         from the one the slot stores, and the next brightness change would
         re-save the slot with HA's, repainting the strip a colour nobody
         picked.
+
+        A schedule carried over while the detail fetch fails is not consulted:
+        it may no longer be the one on the controller.
         """
         usable = [
             e
@@ -712,29 +725,39 @@ class TrimlightLight(
         ]
         if not usable:
             return None
-        for effect_id in _scheduled_effect_ids(self._data, dt_util.now()):
-            scheduled = next((e for e in usable if e["id"] == effect_id), None)
-            if scheduled is not None:
-                return scheduled, "its timer schedule"
+        if not self._data.get("_detail_stale"):
+            for effect_id in _scheduled_effect_ids(self._data, dt_util.now()):
+                scheduled = next((e for e in usable if e["id"] == effect_id), None)
+                if scheduled is not None:
+                    return scheduled, "its timer schedule"
         return usable[0], "its saved effects (the first one)"
 
-    def _effect_to_resume(self, turning_on: bool) -> dict[str, Any] | None:
+    def _effect_to_resume(
+        self, turning_on: bool
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Return the effect to act on when a turn-on names no effect or colour.
 
-        That is the effect HA believes the strip was showing. When HA does not
-        know, one is chosen only for a light that is being turned on: a light
-        that is already on is showing something HA cannot name (a pattern
-        played from the Trimlight app, say), and choosing for it would replace
-        that.
+        Also returns whether that effect is a guess. It is the effect HA
+        believes the strip is showing, or, for a light being turned on, the
+        one it was showing before HA last restarted. When HA knows neither, an
+        effect is picked, but only for a light that is being turned on: a
+        light that is already on is showing something HA cannot name (a
+        pattern played from the Trimlight app, say), and picking one for it
+        would replace that.
         """
         known = self._known_effect()
         if known is not None:
-            return known
+            return known, False
         if not turning_on:
-            return None
+            return None, False
+        name = self._remembered_effect_name
+        if name is not None:
+            remembered = self._effect_by_name(name)
+            if remembered is not None and remembered.get("id") is not None:
+                return remembered, False
         fallback = self._fallback_effect()
         if fallback is None:
-            return None
+            return None, False
         effect, source = fallback
         _LOGGER.info(
             "Home Assistant does not know which effect %s was last showing;"
@@ -743,7 +766,7 @@ class TrimlightLight(
             effect["name"],
             source,
         )
-        return effect
+        return effect, True
 
     def _reactivation_is_owed(self) -> bool:
         """Return True shortly after a turn-on that showed nothing.
@@ -979,20 +1002,30 @@ class TrimlightLight(
                 if (
                     brightness is not None
                     and self._active_effect_name == HA_COLOR_EFFECT_NAME
+                    and self._known_effect() is not None
                 ):
                     # The colour slot is re-saved from the colour HA holds
                     # rather than from the polled copy of the slot, which lags
-                    # a colour change by up to one poll.
+                    # a colour change by up to one poll. Only while the slot
+                    # exists, though: re-saving one deleted in the Trimlight
+                    # app would create a new slot over whatever is showing.
                     hs_color = self._attr_hs_color or (0.0, 0.0)
                 elif brightness is not None or turning_on:
-                    effect = self._effect_to_resume(turning_on)
-                    if effect is None and brightness is not None:
-                        brightness_problem = self._unknown_effect_problem()
+                    effect, guessed = self._effect_to_resume(turning_on)
+                    if brightness is not None and (effect is None or guessed):
+                        brightness_problem = (
+                            self._guessed_effect_problem(effect)
+                            if effect is not None
+                            else self._unknown_effect_problem()
+                        )
                         if not turning_on:
                             raise ServiceValidationError(brightness_problem)
-                        # Nothing to apply the brightness to, but the light is
-                        # off: still power it on, as a plain turn-on would,
-                        # and report the brightness afterwards.
+                        # Nothing to apply the brightness to, or only an
+                        # effect HA picked: a brightness is saved into the
+                        # effect, and the timer runs that same saved effect, so
+                        # it is not written into one nobody chose. The light is
+                        # off, though, so turn it on with the picked effect as
+                        # it is saved, and report the brightness afterwards.
                         brightness = None
                 elif on_timer:
                     # A plain turn-on of a light its timer has lit. Leaving
@@ -1021,6 +1054,7 @@ class TrimlightLight(
             self.async_write_ha_state()
 
             powered = False
+            resumed = False
             shown = False
             try:
                 # Always power on first, even when HA already believes the
@@ -1038,6 +1072,7 @@ class TrimlightLight(
                 # effect was activated.
                 if plain:
                     if effect is not None:
+                        resumed = True
                         shown = await self._resume(effect)
                 elif effect is not None:
                     await self._activate_effect(effect, brightness)
@@ -1052,23 +1087,28 @@ class TrimlightLight(
                     shown = True
             except TrimlightApiError as err:
                 self._restore_snapshot(snapshot)
-                if powered and (turning_on or on_timer):
+                if powered and turning_on:
                     self._reactivation_owed_since = time.monotonic()
                 raise HomeAssistantError(
                     f"Failed to turn on {self.entity_id}: {err}"
                 ) from err
 
-            if not shown and (turning_on or on_timer):
-                # The controller was powered on, or taken off its timer,
-                # without the strip being told what to show. HA shows it on all
-                # the same, so leave a note for the next turn-on.
+            if not shown and (turning_on or resumed):
+                # The controller was powered on from off without the strip
+                # being told what to show, or a re-activation was tried and
+                # did not take. HA shows the light on all the same, so leave a
+                # note for the next turn-on. Not when a light its timer has lit
+                # simply had nothing HA could name: nothing is picked for a
+                # lit light, on a second turn-on either.
                 self._reactivation_owed_since = time.monotonic()
 
             if brightness_problem is not None:
                 # The power-on landed, so the light is on, and HA holds that
                 # like after any other command that landed: a poll that has not
-                # caught up yet must not show it off again. Only the brightness
-                # asked for could not be applied, which the call reports.
+                # caught up yet must not show it off again. Publish what it now
+                # shows; only the brightness asked for was not applied, which
+                # the call reports.
+                self.async_write_ha_state()
                 raise HomeAssistantError(
                     f"Turned on {self.entity_id}, but could not set its"
                     f" brightness. {brightness_problem}"
@@ -1168,9 +1208,14 @@ class TrimlightLight(
         the Trimlight app since the last poll, or a cloud that cannot read the
         controller's data, would otherwise break turning on altogether. The
         warning leaves a trace for the controllers that do need this step.
+
+        Rejected credentials are not a detail to log, though: they fail the
+        call, as they would at any other step.
         """
         try:
             await self._activate_effect(effect)
+        except TrimlightAuthError:
+            raise
         except TrimlightApiError as err:
             _LOGGER.warning(
                 "Turned on %s, but could not re-activate '%s': %s. If the"
@@ -1184,21 +1229,36 @@ class TrimlightLight(
         return True
 
     def _unknown_effect_problem(self) -> str:
-        """Explain why a brightness-only command cannot be applied.
+        """Explain why a brightness-only command has nothing to apply to.
 
-        With no idea what is running, the only thing left to re-save is the
-        colour slot, which would replace the pattern on the strip with a solid
-        colour nobody asked for. Refusing is the honest answer.
+        A brightness is saved into an effect, so without a saved effect that
+        HA knows the strip is showing there is nothing to save it into.
         """
         if self._data.get("currentEffect") is None and not self._effects:
             return (
                 "Home Assistant does not know what this light is showing yet."
                 " Wait for the next update, or pick an effect or a colour."
             )
+        name = self._active_effect_name
+        if name is not None:
+            return (
+                f"The effect '{name}' is no longer saved on the controller, so"
+                " there is nothing to apply the brightness to. Pick an effect"
+                " or a colour first."
+            )
         return (
             "Home Assistant cannot tell which effect this light is running, so"
-            " changing only the brightness would replace it with a solid"
-            " colour. Pick an effect or a colour first."
+            " there is nothing to apply the brightness to. Pick an effect or a"
+            " colour first."
+        )
+
+    def _guessed_effect_problem(self, effect: dict[str, Any]) -> str:
+        """Explain why a brightness is not applied to an effect HA picked."""
+        return (
+            "Home Assistant did not know which effect this light was last"
+            f" showing, so it turned it on with '{effect.get('name')}' and left"
+            " the brightness that effect is saved with alone. Set the"
+            " brightness again to change it."
         )
 
     async def _set_color(

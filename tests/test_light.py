@@ -20,7 +20,7 @@ from pytest_homeassistant_custom_component.common import (
     mock_restore_cache_with_extra_data,
 )
 
-from custom_components.trimlight.api import TrimlightApiError
+from custom_components.trimlight.api import TrimlightApiError, TrimlightAuthError
 from custom_components.trimlight.const import (
     DOMAIN,
     EFFECT_CATEGORY_BUILTIN,
@@ -2084,18 +2084,54 @@ async def test_turn_on_while_the_timer_has_the_light_lit_shows_the_effect_again(
         assert controller.showing == 1
 
 
-async def test_timer_lit_pattern_nothing_could_name_is_retried(hass, mock_api):
-    """Taking a controller off its timer with nothing to show leaves the note.
+async def test_failed_re_show_under_the_timer_is_retried(hass, mock_api):
+    """A re-activation tried after leaving the timer, and failed, is retried.
 
-    The timer has the light showing a pattern HA cannot identify, so the
-    first turn_on can only power it on, and a controller that shows nothing
-    after a change of mode goes dark. Pressing on again then has to show
-    something, as after a turn-on from off that had nothing to show: here the
-    effect the timer schedule uses.
+    The timer has NEW YEAR lit, which HA identifies, so a turn_on shows it
+    again after the power-on. When that fails, a controller that shows
+    nothing after a change of mode is left dark while HA shows it on, so the
+    next turn_on tries again, as it would after a turn-on from off.
     """
     controller = _ControllerThatDoesNotResume()
     controller.switch_state = 2
-    controller.showing = "pattern from the app"
+    controller.showing = 1
+    controller.attach(mock_api)
+    data = _timer_device([_daily_entry((18, 0), (23, 0))])
+    with patch(
+        "custom_components.trimlight.light.dt_util.now", return_value=_MONDAY
+    ):
+        await _setup_integration(
+            hass, mock_api, coordinator_data=data,
+            entry_id="test_entry_timer_retry", unique_id="test_client_id_timer_retry",
+        )
+        mock_api.view_effect.side_effect = TrimlightApiError(
+            "Request to /path failed: TimeoutError"
+        )
+        await _turn_on(hass)  # The power-on lands; showing NEW YEAR does not.
+        assert controller.showing is None
+
+        controller.attach(mock_api)  # The cloud answers again.
+        mock_api.reset_mock()
+        await _turn_on(hass)
+
+    assert _command_order(mock_api) == ["set_switch_state", "view_effect"]
+    assert controller.showing == 1
+
+
+async def test_timer_lit_pattern_nothing_could_name_is_never_replaced(
+    hass, mock_api
+):
+    """A second turn_on of a timer-lit light still picks nothing for it.
+
+    The timer has the light showing a pattern HA cannot identify, so a
+    turn_on can only power it on. A controller that resumes keeps showing
+    something there, and a second turn_on soon after (a scene, a group, a
+    double tap) must not replace it with an effect HA picked. A controller
+    that goes dark instead is lit again by turning the light off and on.
+    """
+    controller = _ControllerThatDoesNotResume()
+    controller.switch_state = 2
+    controller.showing = "pattern from the timer"
     controller.attach(mock_api)
     data = _timer_device([_daily_entry((18, 0), (23, 0))])
     data[MOCK_DEVICE_ID]["currentEffect"] = _UNMATCHED_CURRENT_EFFECT
@@ -2108,8 +2144,17 @@ async def test_timer_lit_pattern_nothing_could_name_is_retried(hass, mock_api):
         )
         await _turn_on(hass)
         assert _command_order(mock_api) == ["set_switch_state"]
-        assert controller.showing is None
 
+        mock_api.reset_mock()
+        await _turn_on(hass)
+        assert _command_order(mock_api) == ["set_switch_state"]
+        with pytest.raises(ServiceValidationError):
+            await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
+        mock_api.save_effect.assert_not_called()
+
+        # Off and on again is a turn-on from off, which does pick an effect:
+        # here the one the timer schedule uses.
+        await _turn_off(hass)
         mock_api.reset_mock()
         await _turn_on(hass)
 
@@ -2290,17 +2335,57 @@ async def test_partly_landed_turn_on_is_not_undone_by_a_lagging_poll(
     assert hass.states.get(_entity_id()).state == STATE_ON
 
 
-async def test_brightness_from_off_with_unknown_effect_turns_on(hass, mock_api):
-    """Dragging the brightness slider on an off light must light it.
+async def test_brightness_from_off_with_unknown_effect_lights_a_picked_effect(
+    hass, mock_api
+):
+    """Turning an off light on with a brightness lights it even when unknown.
 
     This used to be refused outright whenever HA did not know the effect,
     which left an automation such as "turn on at 40%" failing with the lights
-    off. Turning on from off picks an effect the same way a plain turn-on
-    does, and applies the brightness to it.
+    off. The light is now turned on with an effect picked the same way a
+    plain turn-on picks one. The brightness is not saved into that effect,
+    though: the timer runs the same saved effects, often the very one picked,
+    so it would change how the timer lights them from then on. The call says
+    the brightness was not applied.
     """
     await _setup_integration(
-        hass, mock_api, coordinator_data=_unidentified_device(),
+        hass, mock_api,
+        coordinator_data=_unidentified_device(
+            daily=[{**_daily_entry((18, 0), (23, 0)), "effectId": 2}]
+        ),
         entry_id="test_entry_bri_off", unique_id="test_client_id_bri_off",
+    )
+    with pytest.raises(HomeAssistantError, match="left the brightness"):
+        await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
+
+    assert _command_order(mock_api) == ["set_switch_state", "view_effect"]
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 2)
+    mock_api.save_effect.assert_not_called()
+    state = hass.states.get(_entity_id())
+    assert state.state == STATE_ON
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+    # The brightness the effect is saved with, which is what the strip shows.
+    assert state.attributes.get(ATTR_BRIGHTNESS) == 255
+
+
+async def test_brightness_from_off_applies_to_the_remembered_effect(hass, mock_api):
+    """The effect a light was showing before a restart is not a guess.
+
+    "Turn on at 40%" on a light that was off across a restart brings back the
+    effect it was showing, at 40%, as it would for any effect HA knew.
+    """
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State(_entity_id(), STATE_OFF),
+                {"effect": "INDEPENDENCE DAY", "hs_color": [0.0, 0.0], "brightness": 255},
+            )
+        ],
+    )
+    await _setup_integration(
+        hass, mock_api, coordinator_data=_unidentified_device(),
+        entry_id="test_entry_bri_known", unique_id="test_client_id_bri_known",
     )
     await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
 
@@ -2308,11 +2393,10 @@ async def test_brightness_from_off_with_unknown_effect_turns_on(hass, mock_api):
         "set_switch_state", "save_effect", "view_effect",
     ]
     payload = mock_api.save_effect.call_args[0][1]
-    assert payload["name"] == "NEW YEAR"
+    assert payload["name"] == "INDEPENDENCE DAY"
     assert payload["brightness"] == 100
     state = hass.states.get(_entity_id())
-    assert state.state == STATE_ON
-    assert state.attributes.get(ATTR_EFFECT) == "NEW YEAR"
+    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
     assert state.attributes.get(ATTR_BRIGHTNESS) == 100
 
 
@@ -2350,7 +2434,10 @@ async def test_brightness_only_is_refused_when_the_effect_was_deleted(
         hass.states.get(_entity_id()).attributes.get(ATTR_EFFECT)
         == "DELETED IN THE APP"
     )
-    with pytest.raises(ServiceValidationError, match="cannot tell which effect"):
+    with pytest.raises(
+        ServiceValidationError,
+        match="'DELETED IN THE APP' is no longer saved on the controller",
+    ):
         await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
     mock_api.save_effect.assert_not_called()
 
@@ -2635,7 +2722,13 @@ async def test_effect_is_remembered_across_a_restart_while_off(hass, mock_api):
 
 
 async def test_remembered_values_stand_in_while_detail_is_stale(hass, mock_api):
-    """Colour and brightness saved while off come back with the effect."""
+    """Colour and brightness saved while off stand in; the effect waits.
+
+    With nothing live to go on, the saved colour and brightness are the best
+    values to show. The effect is kept only to bring back when HA turns the
+    light on from off: the light has been lit some other way here, so it is
+    not claimed as what the strip shows.
+    """
     mock_restore_cache_with_extra_data(
         hass,
         [
@@ -2660,9 +2753,66 @@ async def test_remembered_values_stand_in_while_detail_is_stale(hass, mock_api):
         unique_id="test_client_id_remember_stale",
     )
     state = hass.states.get(_entity_id())
-    assert state.attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+    assert state.attributes.get(ATTR_EFFECT) is None
     assert state.attributes.get(ATTR_BRIGHTNESS) == 42
     assert tuple(state.attributes.get(ATTR_HS_COLOR)) == (120.0, 100.0)
+
+    # Turned off and on from HA, it is the effect brought back.
+    await _turn_off(hass)
+    await _turn_on(hass)
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 2)
+    assert hass.states.get(_entity_id()).attributes.get(ATTR_EFFECT) == "INDEPENDENCE DAY"
+
+
+async def test_remembered_effect_is_not_used_for_brightness_on_a_lit_light(
+    hass, mock_api
+):
+    """A brightness change on a light lit since the restart refuses to guess.
+
+    The light was off across a restart, and has since been lit from the
+    Trimlight app with a pattern HA cannot identify. The effect it showed
+    before the restart is no claim about what it shows now, so a brightness
+    change must not re-save that effect over the running pattern.
+    """
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State(_entity_id(), STATE_OFF),
+                {"effect": "NEW YEAR", "hs_color": [0.0, 0.0], "brightness": 255},
+            )
+        ],
+    )
+    coordinator = await _setup_integration(
+        hass, mock_api, coordinator_data=_unidentified_device(),
+        entry_id="test_entry_remember_lit", unique_id="test_client_id_remember_lit",
+    )
+    coordinator.async_set_updated_data(_unidentified_device(switch_state=1))
+    await hass.async_block_till_done()
+    assert hass.states.get(_entity_id()).state == STATE_ON
+
+    with pytest.raises(ServiceValidationError, match="cannot tell which effect"):
+        await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
+    assert _command_order(mock_api) == []
+
+
+async def test_remembered_effect_survives_a_second_restart(hass, mock_api):
+    """What is remembered is saved again, so two restarts in a row keep it."""
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State(_entity_id(), STATE_OFF),
+                {"effect": "INDEPENDENCE DAY", "hs_color": [0.0, 0.0], "brightness": 255},
+            )
+        ],
+    )
+    await _setup_integration(
+        hass, mock_api, coordinator_data=_unidentified_device(),
+        entry_id="test_entry_remember_twice", unique_id="test_client_id_remember_twice",
+    )
+    entity = hass.data["light"].get_entity(_entity_id())
+    assert entity.extra_restore_state_data.as_dict()["effect"] == "INDEPENDENCE DAY"
 
 
 async def test_unusable_remembered_values_are_ignored(hass, mock_api):
@@ -2714,3 +2864,114 @@ async def test_last_effect_is_saved_for_restore_even_when_off(hass, mock_api):
     assert saved["effect"] == "INDEPENDENCE DAY"
     assert saved["brightness"] == 42
     assert len(saved["hs_color"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Pre-release review: colour slot, credentials and a stale schedule           #
+# --------------------------------------------------------------------------- #
+
+
+async def test_brightness_on_a_deleted_colour_slot_is_refused(hass, mock_api):
+    """A brightness change must not re-create a colour slot deleted in the app.
+
+    The light was showing HA's colour when HA last stopped, and the "HA Color"
+    effect has since been deleted in the Trimlight app, which now has the
+    strip on a pattern HA cannot identify. Re-saving the slot for a brightness
+    change would create a new one and paint the strip a solid colour over the
+    running pattern, so the change is refused like any for a deleted effect.
+    """
+    mock_restore_cache(
+        hass,
+        [State(_entity_id(), STATE_ON, {ATTR_EFFECT: HA_COLOR_EFFECT_NAME})],
+    )
+    await _setup_integration(
+        hass, mock_api, coordinator_data=_unidentified_device(switch_state=1),
+        entry_id="test_entry_slot_deleted", unique_id="test_client_id_slot_deleted",
+    )
+    assert (
+        hass.states.get(_entity_id()).attributes.get(ATTR_EFFECT)
+        == HA_COLOR_EFFECT_NAME
+    )
+    with pytest.raises(ServiceValidationError, match="no longer saved"):
+        await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
+    assert _command_order(mock_api) == []
+
+
+async def test_brightness_from_off_with_an_unresolvable_colour_slot_stays_on(
+    hass, mock_api
+):
+    """A colour slot that cannot be found does not undo the power-on.
+
+    HA remembers its colour, but the effect list has not loaded since the
+    restart, so the slot cannot be found and nothing can take the brightness.
+    The light is still turned on, as for any effect that cannot be found,
+    rather than reported as failing to turn on and shown off again.
+    """
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State(_entity_id(), STATE_ON, {ATTR_EFFECT: HA_COLOR_EFFECT_NAME}),
+                {"effect": HA_COLOR_EFFECT_NAME, "hs_color": [0.0, 100.0], "brightness": 255},
+            )
+        ],
+    )
+    list_only = {MOCK_DEVICE_ID: {**MOCK_DEVICE_LIST[0], "switchState": 0}}
+    await _setup_integration(
+        hass, mock_api, coordinator_data=list_only,
+        entry_id="test_entry_slot_unloaded", unique_id="test_client_id_slot_unloaded",
+    )
+    assert hass.states.get(_entity_id()).state == STATE_OFF
+
+    with pytest.raises(HomeAssistantError, match="could not set its brightness"):
+        await _turn_on(hass, **{ATTR_BRIGHTNESS: 100})
+
+    assert _command_order(mock_api) == ["set_switch_state"]
+    assert hass.states.get(_entity_id()).state == STATE_ON
+
+
+async def test_rejected_credentials_fail_a_turn_on_that_re_activates(
+    hass, mock_api
+):
+    """Credentials rejected mid turn-on are not swallowed as a minor hiccup.
+
+    A failed re-activation is otherwise only logged, since the power-on has
+    landed. Rejected credentials are different: nothing else will work
+    either, so the call fails and says why.
+    """
+    off_data = {
+        MOCK_DEVICE_ID: {**MOCK_COORDINATOR_DATA[MOCK_DEVICE_ID], "switchState": 0}
+    }
+    await _setup_integration(
+        hass, mock_api, coordinator_data=off_data,
+        entry_id="test_entry_auth_resume", unique_id="test_client_id_auth_resume",
+    )
+    mock_api.view_effect.side_effect = TrimlightAuthError(
+        "API auth error 12001: Invalid API authentication", code=12001
+    )
+    with pytest.raises(HomeAssistantError, match="12001"):
+        await _turn_on(hass)
+
+
+async def test_fallback_ignores_a_schedule_carried_over_from_a_failing_fetch(
+    hass, mock_api
+):
+    """A schedule kept from before the detail fetch began failing is not used.
+
+    It may no longer be the one on the controller, which is also why the
+    on/off state is not derived from it, so the fallback takes the first
+    saved effect instead of the effect that old schedule named.
+    """
+    data = _unidentified_device(
+        daily=[{**_daily_entry((18, 0), (23, 0)), "effectId": 2}],
+        _detail_stale=True,
+    )
+    await _setup_integration(
+        hass, mock_api, coordinator_data=data,
+        entry_id="test_entry_stale_sched", unique_id="test_client_id_stale_sched",
+    )
+    assert hass.states.get(_entity_id()).state == STATE_OFF
+
+    await _turn_on(hass)
+
+    mock_api.view_effect.assert_called_once_with(MOCK_DEVICE_ID, 1)
